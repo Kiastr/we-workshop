@@ -314,6 +314,18 @@ public class Bridge {
         return DownloadStore.list().toString();
     }
 
+    /** 列出本地已下载、可播放的视频（并懒启动 loopback 视频服务）。
+     *  返回 {ok, base, items:[{id,name,title,img,size,mime,url}]}。
+     *  items[].url 直接作为 <video crossorigin="anonymous" src> 使用：视频走
+     *  http://127.0.0.1 的本地流（支持 Range/206 拖动），CORS 已由服务侧放行，
+     *  WebGL 用视频帧做纹理时不会污染 canvas。详见 LocalVideoServer 文件头。 */
+    @JavascriptInterface
+    public String localVideos() {
+        LocalVideoServer srv = LocalVideoServer.get(activity);
+        if (srv == null) return "{\"ok\":false,\"error\":\"视频服务启动失败\"}";
+        return srv.listJson();
+    }
+
     @JavascriptInterface
     public void removeDownload(String itemId) {
         try {

@@ -18,6 +18,7 @@
       <svg class="search-icon" viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
       <input id="search" type="search" placeholder="搜索创意工坊" autocomplete="off">
     </div>
+    <button id="playerBtn" class="icon-btn" title="本地视频播放与超分">▶</button>
     <button id="downloadsBtn" class="icon-btn" title="下载列表">⤓</button>
     <button id="settingsBtn" class="icon-btn" title="设置">⚙</button>
   </div>
@@ -152,6 +153,73 @@
   </div>
 </div>
 
+<!-- 播放器：隐藏的 video 只作 WebGL 纹理源，显示的是 canvas。
+     video 不能用 display:none（部分 WebView 会停止解码），改用 1px 透明。 -->
+<div id="player" class="modal hidden player-modal">
+  <div class="modal-backdrop" id="playerBackdrop"></div>
+  <div class="modal-body player-body">
+    <button class="modal-close" id="playerClose">✕</button>
+
+    <div id="playerList" class="player-list">
+      <h2 class="settings-title">本地视频</h2>
+      <div class="sr-guide">
+        <b>真超分提示</b>：画面会放大到视频源约 <b>1.2×–2×</b> 后渲染，低于 1.2× 时放大链不会生效。
+        卡顿时会自动逐档降级；按住「A/B」可对比原画。渲染尺寸在创建时锁定，播放中不会改变。
+      </div>
+      <div id="srGuideOnce" class="sr-guide sr-guide-once hidden">
+        首次使用：建议从「Anime4K 官方 · Fast」开始；≤720p 视频可尝试更高档位。
+        部分 3D / MKV / MOV 源可能受 WebView 解码能力限制。
+        <button id="srGuideOnceBtn" class="btn-ghost">知道了</button>
+      </div>
+      <div id="playerItems" class="pv-list"></div>
+      <div id="srLicenses" class="sr-licenses"></div>
+    </div>
+
+    <div id="playerStage" class="player-stage hidden">
+      <div class="sr-title" id="srTitle"></div>
+      <div class="sr-canvas-wrap"><canvas id="srCanvas"></canvas></div>
+      <video id="srVideo" crossorigin="anonymous" playsinline preload="auto"></video>
+      <div id="srInfo" class="sr-info">准备中…</div>
+      <div id="srLog" class="sr-log"></div>
+      <div class="sr-controls">
+        <button id="srPlay" class="sr-btn" title="播放 / 暂停">⏸</button>
+        <input id="srSeek" class="sr-seek" type="range" min="0" max="1000" value="0" title="拖动进度">
+        <span id="srTime" class="sr-time">00:00 / 00:00</span>
+      </div>
+      <div class="sr-controls sr-controls-2">
+        <label class="sr-field">超分档位
+          <select id="srTier" class="sr-select" title="按算力从低到高排列，卡顿会自动降档"></select>
+        </label>
+        <label class="sr-field">倍速
+          <select id="srRate" class="sr-select" title="倍速播放时看门狗不采样">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+        <button id="srAB" class="sr-btn" title="按住显示原画，松开恢复超分">A/B 对比</button>
+        <button id="srFull" class="sr-btn" title="切换全屏">全屏</button>
+        <button id="srBack" class="sr-btn" title="返回视频列表">返回列表</button>
+      </div>
+      <div class="sr-guide sr-guide-small">
+        档位按算力升序排列（= 自动降档顺序）。状态栏显示「N pass」即表示超分链真的跑了；
+        显示 0 pass 说明 1.2× 判据未满足或设备能力不足。
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
+<!-- 超分资源（自动生成，勿手改）与运行时，顺序有依赖关系 -->
+<script src="sr/shaders.js"></script>
+<script src="sr/weights.js"></script>
+<script src="sr/manifest.js"></script>
+<script src="sr/hook.js"></script>
+<script src="sr/animejanai.js"></script>
+<script src="sr/surface.js"></script>
+<script src="sr/renderer.js"></script>
+<script src="sr/controller.js"></script>
+<script src="player.js"></script>
 </body>
 </html>

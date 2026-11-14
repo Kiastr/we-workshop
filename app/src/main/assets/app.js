@@ -451,6 +451,12 @@ function closeDetail() {
 }
 
 window.__onBack = function () {
+  // 播放器优先级最高：播放页先回列表，列表页才关闭（由 player.js 处理）
+  const player = document.getElementById('player');
+  if (player && !player.classList.contains('hidden')) {
+    if (window.__playerBack) window.__playerBack();
+    return true;
+  }
   const settings = document.getElementById('settings');
   if (settings && !settings.classList.contains('hidden')) {
     closeSettings();

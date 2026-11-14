@@ -40,11 +40,25 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: 安装 Android SDK 并接受许可
-        uses: android-actions/setup-android@v3
-
-      - name: 安装 compileSdk 35 / build-tools 35.0.0
-        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools" > /dev/null
+      - name: 接受许可并安装 compileSdk 35 / build-tools 35.0.0
+        # 直接使用 ubuntu-latest 预装的 Android SDK，不用 android-actions/setup-android：
+        # 其 v3 与 runner 预装的 cmdline-tools 16.0 不兼容
+        # （Wrong version in preinstalled sdkmanager → Failed to find package 'tools' → exit 1）。
+        run: |
+          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort | tail -1)
+          fi
+          if [ ! -x "$SDKMANAGER" ]; then echo "未找到 sdkmanager"; exit 1; fi
+          echo "sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "platform-tools" > /dev/null
+          test -d "$ANDROID_HOME/platforms/android-35" || { echo "platforms;android-35 未安装"; exit 1; }
+          test -d "$ANDROID_HOME/build-tools/35.0.0" || { echo "build-tools;35.0.0 未安装"; exit 1; }
+          echo "Android SDK 组件就绪"
 
       - name: CI 内改用官方 Gradle 发行版
         # 仓库 wrapper 指向腾讯云镜像（方便国内开发机），境外 runner 改回官方源。

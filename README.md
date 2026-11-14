@@ -111,6 +111,21 @@ sdk.dir=/path/to/android-sdk
 
 主要依赖：`in.dragonbra:javasteam`（Steam 协议）、OkHttp、protobuf-java、BouncyCastle、zstd-jni、xz、lz4。播放与超分**不新增任何第三方依赖**，纯 WebView + WebGL2 + Java 标准库。
 
+### GitHub Actions 自动出包
+
+仓库内置 `.github/workflows/build-release.yml`，无需本地装 Android SDK 也能出包：
+
+| 触发方式 | 行为 |
+| --- | --- |
+| push 到 `main`（仅改文档 / `tools/` 不触发） | 自动执行 `assembleRelease` 并发布 / 更新 Release |
+| Actions 页手动 `Run workflow` | 可填版本号重跑；留空则取 `app/build.gradle` 的 `versionName` |
+
+流水线：Temurin JDK 17 → Android SDK 35 / build-tools 35.0.0 → **仅 CI 内**把 wrapper 的腾讯云镜像地址换成官方源（不写回仓库，不影响本地 `./gradlew`）→ `assembleRelease` → `apksigner verify` 确认已签名 → 重命名为 `we-workshop-v<版本>.apk` 并生成 `.sha256` → 上传到 Release `v<版本>`（同名附件覆盖）→ 另存 14 天构建 artifact 便于排查。
+
+产物在仓库 **Releases** 页下载。当前 `versionName = 0.5.7`，对应 tag `v0.5.7`；升级版本只需改 `app/build.gradle` 的 `versionCode` / `versionName` 后 push。
+
+> **签名现状**：`app/build.gradle` 的 `release` 变体沿用 `signingConfigs.debug`（与仓库既有配置一致），CI 上会自动生成 debug keystore，`assembleRelease` 无需任何 Secrets 即可跑通。APK 可直接安装，但**不是正式发布签名**：每次 CI 生成的密钥不同，覆盖安装前需先卸载旧版本，也不适合上架应用商店。如需正式签名，需自行配置 `signingConfigs` 并把 keystore 以加密 Secrets 注入——`*.jks` / `*.keystore` 已被 `.gitignore` 排除，切勿把 keystore 或密码提交进仓库。
+
 ## 资源再生成
 
 `app/src/main/assets/sr/` 下的 `shaders.js` / `weights.js` / `manifest.js` 是**自动生成文件，勿手改**。上游原始素材在 `tools/sources/`（GLSL + ONNX），生成脚本在 `tools/gen_assets.py`。

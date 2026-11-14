@@ -1,0 +1,152 @@
+name: Build Release APK
+
+# 编译 release APK 并发布到 GitHub Release。
+# 设计取舍见 README「构建 → GitHub Actions 自动出包」。
+on:
+  push:
+    branches: [main]
+    # 仅文档 / 开发脚本改动不触发出包，避免无意义地重复发布。
+    paths-ignore:
+      - '**.md'
+      - 'tools/**'
+      - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release 版本号（留空则读取 app/build.gradle 的 versionName）'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-release-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 编译并发布 Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Android SDK 并接受许可
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 compileSdk 35 / build-tools 35.0.0
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools" > /dev/null
+
+      - name: CI 内改用官方 Gradle 发行版
+        # 仓库 wrapper 指向腾讯云镜像（方便国内开发机），境外 runner 改回官方源。
+        # 只改 CI 工作副本，不写回仓库，不影响本地 ./gradlew。
+        run: |
+          sed -i 's#mirrors.cloud.tencent.com/gradle/#services.gradle.org/distributions/#' \
+            gradle/wrapper/gradle-wrapper.properties
+          grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties
+
+      - name: 配置 Gradle 缓存
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 确保 debug keystore 存在
+        # app/build.gradle 的 release 变体沿用 signingConfigs.debug。
+        # AGP 一般会自动生成；这里显式创建，避免全新 runner 上首次构建失败。
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" -noprompt
+          fi
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android \
+            -alias androiddebugkey > /dev/null
+          echo "debug keystore OK"
+
+      - name: 解析版本号
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          V=$(sed -n 's/.*versionName "\(.*\)".*/\1/p' app/build.gradle | head -1)
+          if [ -z "$V" ]; then echo "无法从 app/build.gradle 读取 versionName"; exit 1; fi
+          if [ -n "$INPUT_VERSION" ]; then V="$INPUT_VERSION"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+          echo "解析到版本: $V (tag v$V)"
+
+      - name: 编译 release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: 校验签名并重命名 APK
+        id: apk
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          SRC=$(find app/build/outputs/apk/release -type f -name '*.apk' | head -1)
+          if [ -z "$SRC" ]; then echo "未找到 APK 产物"; exit 1; fi
+          OUT="we-workshop-v${VERSION}.apk"
+          cp "$SRC" "$OUT"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort | tail -1)
+          if [ -z "$APKSIGNER" ]; then echo "未找到 apksigner"; exit 1; fi
+          "$APKSIGNER" verify --verbose "$OUT"
+          sha256sum "$OUT" > "$OUT.sha256"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "$OUT")" >> "$GITHUB_OUTPUT"
+          echo "产物: $OUT ($(stat -c%s "$OUT") bytes)"
+
+      - name: 上传构建产物（便于排查）
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: |
+            ${{ steps.apk.outputs.file }}
+            ${{ steps.apk.outputs.file }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 发布到 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          APK: ${{ steps.apk.outputs.file }}
+          SHA: ${{ github.sha }}
+        run: |
+          SUM=$(cut -d' ' -f1 < "${APK}.sha256")
+          cat > release_notes.md <<EOF
+          ### WE 工坊 v${VERSION}
+
+          由 GitHub Actions 自动编译，源码提交 ${SHA:0:7}（main）。
+
+          - 产物：${APK}
+          - SHA256：${SUM}
+          - 变体：release，沿用仓库现有的 debug 签名配置
+
+          > 签名提示：release 变体当前使用 signingConfigs.debug，不是正式发布签名。
+          > 每次 CI 生成的密钥不同，覆盖安装前需先卸载旧版本；请勿用于应用商店分发。
+
+          安装：下载 APK 后在手机上允许「安装未知应用」即可。项目仅供个人学习与自用。
+          EOF
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖上传附件"
+            gh release upload "$TAG" "$APK" "$APK.sha256" --clobber
+          else
+            echo "创建 Release $TAG"
+            gh release create "$TAG" "$APK" "$APK.sha256" \
+              --target "$SHA" \
+              --title "WE 工坊 v${VERSION}" \
+              --notes-file release_notes.md
+          fi
+          gh release view "$TAG" --json tagName,url,assets \
+            --jq '"发布完成: " + .tagName + " | " + .url + " | assets=" + (.assets|length|tostring)'

@@ -7,7 +7,11 @@ import android.net.NetworkCapabilities
 import android.util.Log
 import `in`.dragonbra.javasteam.enums.EOSType
 import `in`.dragonbra.javasteam.enums.EResult
+import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesAuthSteamclient.EAuthSessionGuardType
+import `in`.dragonbra.javasteam.steam.authentication.AuthPollResult
+import `in`.dragonbra.javasteam.steam.authentication.AuthSession
 import `in`.dragonbra.javasteam.steam.authentication.AuthSessionDetails
+import `in`.dragonbra.javasteam.steam.authentication.AuthenticationException
 import `in`.dragonbra.javasteam.steam.authentication.IAuthenticator
 import `in`.dragonbra.javasteam.steam.authentication.SteamAuthentication
 import `in`.dragonbra.javasteam.steam.handlers.steamapps.SteamApps
@@ -64,6 +68,7 @@ object SteamService {
     @Volatile private var appContext: Context? = null
     @Volatile private var refreshToken: String = ""
     @Volatile private var reconnectJob: Job? = null
+    @Volatile private var restoreJob: Job? = null
 
     @Volatile var isLoggedIn = false
         private set
@@ -104,6 +109,16 @@ object SteamService {
     /** UI 点了「改用验证码」：需要中断当前正在等待手机确认的登录，重来一次。 */
     @Volatile private var codeLoginRequested = false
 
+    /**
+     * 该账号是否真的能走「验证码」。
+     *
+     * 只有当 Steam 下发的 allowedConfirmations 里含 DeviceCode / EmailCode 时，
+     * 放弃手机确认才有意义；否则点「改用验证码」只会重建一次会话再撞回同一堵墙。
+     * 界面按钮据此显示，避免用户点进死胡同。
+     */
+    @Volatile var codeFallbackAvailable = false
+        private set
+
     /** 正在等待手机确认的 poll future，取消它才能让 .get() 立刻返回。 */
     @Volatile private var pollFuture: CompletableFuture<*>? = null
 
@@ -129,9 +144,12 @@ object SteamService {
         if (token.isNotBlank() && account.isNotBlank()) {
             accountName = account
             status = "正在恢复 Steam 会话…"
-            scope.launch {
+            restoreJob = scope.launch {
                 try {
                     restoreSession(account, token)
+                } catch (e: java.util.concurrent.CancellationException) {
+                    // 用户手动登录时会把恢复流程取消，这时别去覆盖登录流程正在显示的状态。
+                    Log.i(TAG, "restore session cancelled")
                 } catch (t: Throwable) {
                     Log.w(TAG, "restore session failed", t)
                     isLoggedIn = false
@@ -162,11 +180,19 @@ object SteamService {
      * @param forceCode 跳过「手机确认」，直接要验证码。UI 点「改用验证码」后由 [login] 内部重试时传 true。
      */
     suspend fun login(username: String, password: String, forceCode: Boolean = false): Boolean {
-        if (busy) return false
-        busy = true
+        if (!claimLogin()) return false
+        // 启动时的「恢复会话」会和手动登录抢同一条连接和 logonCallback，
+        // 必须先把它停干净：cancel 只是发信号，join 才能保证它不再碰 client。
+        restoreJob?.let { job ->
+            job.cancel()
+            runCatching { job.join() }
+        }
+        restoreJob = null
         error = ""
         guardNeeded = false
         forceCodeLogin = forceCode
+        codeLoginRequested = false
+        codeFallbackAvailable = false
         try {
             withContext(Dispatchers.IO) {
                 status = "正在连接 Steam…"
@@ -193,18 +219,38 @@ object SteamService {
                     .beginAuthSessionViaCredentials(details)
                     .get(60, TimeUnit.SECONDS)
                 // 把 Steam 允许的验证方式写进日志：手机确认 / 手机令牌 / 邮箱，决定后面走哪条路。
-                runCatching {
-                    val kinds = authSession.allowedConfirmations.joinToString(",") {
-                        it.confirmationType.name.removePrefix("k_EAuthSessionGuardType_")
-                    }
-                    fileLog("allowedConfirmations=[$kinds]")
+                val kinds = authSession.allowedConfirmations.map {
+                    it.confirmationType.name.removePrefix("k_EAuthSessionGuardType_")
                 }
+                codeFallbackAvailable = authSession.allowedConfirmations.any {
+                    it.confirmationType == EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceCode ||
+                        it.confirmationType == EAuthSessionGuardType.k_EAuthSessionGuardType_EmailCode
+                }
+                fileLog("allowedConfirmations=[${kinds.joinToString(",")}] codeFallback=$codeFallbackAvailable")
+
                 status = "等待 Steam 验证…"
                 notifyState()
-                val pf = authSession.pollingWaitForResult()
-                pollFuture = pf
-                val poll = pf.get(600, TimeUnit.SECONDS)
-                pollFuture = null
+
+                // 「手机确认」自己轮询（原因见 pollDeviceConfirmationWithReconnect 的注释）；
+                // 验证码分支仍交给 javaSteam，因为提交验证码的接口没有对外开放。
+                // wantCode 额外要求 codeFallbackAvailable：账号根本没有验证码可退时，
+                // 就算 forceCode 也要老老实实回到手机确认，否则只会重建一次会话再失败。
+                val wantCode = forceCodeLogin && codeFallbackAvailable
+                val isDeviceConfirm = !wantCode &&
+                    authSession.allowedConfirmations.firstOrNull()?.confirmationType ==
+                    EAuthSessionGuardType.k_EAuthSessionGuardType_DeviceConfirmation
+                val poll: AuthPollResult = if (isDeviceConfirm) {
+                    requestDeviceConfirmation()
+                    pollDeviceConfirmationWithReconnect(authSession, System.currentTimeMillis() + 600_000L)
+                } else {
+                    val pf = authSession.pollingWaitForResult()
+                    pollFuture = pf
+                    try {
+                        pf.get(600, TimeUnit.SECONDS)
+                    } finally {
+                        pollFuture = null
+                    }
+                }
                 // guardData 会随登录下发，存下来减少下次 2FA。
                 poll.newGuardData?.takeIf { it.isNotBlank() }?.let {
                     prefs?.edit()?.putString("guard_data", it)?.apply()
@@ -220,6 +266,9 @@ object SteamService {
                 refreshToken = token
                 prefs?.edit()?.putString("refresh_token", token)?.putString("account_name", account)?.apply()
                 isLoggedIn = true
+                // 登录成功就撤掉「等待确认」的界面状态，别把 guard 标记留给下一次。
+                guardNeeded = false
+                guardType = ""
                 status = "已登录：$account"
                 notifyState()
             }
@@ -243,6 +292,100 @@ object SteamService {
         } finally {
             busy = false
         }
+    }
+
+    /**
+     * 抢占登录权：连点两次登录时只放行第一个，避免同时发起两个认证会话
+     * （手机上会收到两条确认请求，批错一条就会被服务端判成 Cancelled）。
+     */
+    @Synchronized
+    private fun claimLogin(): Boolean {
+        if (busy) return false
+        busy = true
+        return true
+    }
+
+    /**
+     * 自己轮询「手机确认」结果，断线后重连继续等。
+     *
+     * 为什么不用 javaSteam 的 pollingWaitForResult()：
+     * 它的 poll 请求挂在 AsyncJobManager 上，而 SteamClient.onClientDisconnected() 会调
+     * jobManager.cancelPendingJobs()，AsyncJobSingle.setFailed(false) 的实现是
+     * future.cancel(true)。也就是说等待手机确认期间只要断一次网（切到手机 App、锁屏、
+     * VPN 抖动、心跳超时），正在等待的 poll 就抛 CancellationException，
+     * 被 friendlyError 翻成「登录已取消」——用户其实什么都没取消，
+     * Steam 服务端也仍然留着这个 requestID，手机上批准后本可以拿到 token。
+     *
+     * 这里改成：断线 → 重连 → 用同一个 authSession 继续 poll。
+     * requestID 存在服务端，重连后照常生效，手机上的批准不会白费。
+     */
+    private suspend fun pollDeviceConfirmationWithReconnect(
+        authSession: AuthSession,
+        deadlineMs: Long,
+    ): AuthPollResult {
+        // pollingInterval 单位是秒（Steam 一般下发 5.0），javaSteam 内部直接 delay(toLong())
+        // 当毫秒用，实际变成了 5ms 一次；这里按秒换算，并夹在 1~10s 之间。
+        val intervalMs = (authSession.pollingInterval * 1000f).toLong().coerceIn(1_000L, 10_000L)
+        var lastError: Throwable? = null
+        while (System.currentTimeMillis() < deadlineMs) {
+            if (codeLoginRequested) throw java.util.concurrent.CancellationException("switch to code login")
+            try {
+                if (client?.isConnected != true) {
+                    status = "网络断开，正在重连 Steam…（连上后会接着等手机确认）"
+                    notifyState()
+                    fileLog("poll: client disconnected, reconnecting")
+                    connectAndWait()
+                    status = "请在手机 Steam App 中确认本次登录"
+                    notifyState()
+                    fileLog("poll: reconnected, resume polling")
+                }
+                val f = authSession.pollAuthSessionStatus()
+                pollFuture = f
+                val result = try {
+                    f.get(45, TimeUnit.SECONDS)
+                } finally {
+                    pollFuture = null
+                }
+                if (result != null) return result
+            } catch (e: Throwable) {
+                // 用户点了「改用验证码」：交回 login() 的 catch 分支去重试。
+                if (codeLoginRequested) throw e
+                val root = rootCause(e)
+                // 会话真的废了（过期 / 被撤销 / 用户拒绝）：重试只是白等。
+                if (root is AuthenticationException && isTerminalPollResult(root.result)) throw root
+                lastError = root
+                fileLog("poll retry: ${describeChain(e)}")
+            }
+            if (codeLoginRequested) throw java.util.concurrent.CancellationException("switch to code login")
+            delay(intervalMs)
+        }
+        throw java.util.concurrent.TimeoutException(
+            "Steam 验证超时" + (lastError?.message?.let { "（最后一次错误：$it）" } ?: "")
+        )
+    }
+
+    /** poll 返回这些结果时说明会话已经作废，继续重试只会白等。 */
+    private fun isTerminalPollResult(result: EResult?): Boolean = when (result) {
+        EResult.Expired,
+        EResult.FileNotFound,
+        EResult.Revoked,
+        EResult.Cancelled,
+        EResult.AccessDenied,
+        EResult.Fail -> true
+        else -> false
+    }
+
+    /** 取异常链最深处的那一个：.get() 抛的 ExecutionException 会把真正原因包两层。 */
+    private fun rootCause(t: Throwable): Throwable {
+        var cur = t
+        var guard = 0
+        while (guard < 6) {
+            val next = cur.cause ?: break
+            if (next === cur) break
+            cur = next
+            guard++
+        }
+        return cur
     }
 
     private suspend fun restoreSession(account: String, token: String) {
@@ -317,6 +460,15 @@ object SteamService {
     @JvmStatic
     fun useCodeLogin() {
         if (!guardNeeded || guardType != "device_confirm") return
+        // 账号只允许手机确认时，切验证码等于重建会话再撞回同一堵墙，还可能让手机上的
+        // 确认请求失效。直接说明原因，不打断当前等待。
+        if (!codeFallbackAvailable) {
+            fileLog("code login unavailable: only device confirmation allowed")
+            status = "该账号只支持手机 App 确认：请打开手机上的 Steam App 点「允许」"
+            error = ""
+            notifyState()
+            return
+        }
         codeLoginRequested = true
         guardNeeded = false
         fileLog("user chose code login over device confirmation")
@@ -341,6 +493,7 @@ object SteamService {
             guardType = ""
             forceCodeLogin = false
             codeLoginRequested = false
+            codeFallbackAvailable = false
             pollFuture = null
             prefs?.edit()?.remove("refresh_token")?.remove("account_name")?.remove("guard_data")?.apply()
             status = "未登录"
@@ -357,6 +510,7 @@ object SteamService {
         append("\"guard\":").append(guardNeeded).append(',')
         append("\"guardType\":\"").append(guardType.replace("\"", "")).append("\",")
         append("\"guardEmail\":\"").append(guardEmail.replace("\"", "")).append("\",")
+        append("\"codeFallback\":").append(codeFallbackAvailable).append(',')
         append("\"account\":\"").append(accountName.replace("\"", "\\\"")).append("\",")
         append("\"status\":\"").append(status.replace("\\", "\\\\").replace("\"", "\\\"")).append("\",")
         append("\"error\":\"").append(error.replace("\\", "\\\\").replace("\"", "\\\"")).append('"')
@@ -446,10 +600,6 @@ object SteamService {
      * 让 javaSteam 降级到 allowedConfirmations[1]（DeviceCode），由 UI 收 5 位令牌码。
      */
     internal fun requestDeviceConfirmation(): CompletableFuture<Boolean> {
-        if (forceCodeLogin) {
-            fileLog("device confirmation declined (force code login)")
-            return CompletableFuture.completedFuture(false)
-        }
         guardType = "device_confirm"
         guardEmail = ""
         guardNeeded = true
@@ -459,6 +609,9 @@ object SteamService {
         notifyState()
         return CompletableFuture.completedFuture(true)
     }
+
+    /** javaSteam 在决定「等手机确认」还是「降级到验证码」前会调一次，用来读当前意图。 */
+    internal fun forceCodeLoginActive(): Boolean = forceCodeLogin
 
     // ---------------- 创意工坊查询（与 Steam 客户端一致的数据源） ----------------
 
@@ -733,7 +886,12 @@ object SteamService {
         return when {
             timedOut ->
                 "Steam 验证超时（10 分钟没等到确认）。若手机没弹出确认框，请重试并点「改用验证码登录」。"
-            cancelled -> "登录已取消"
+            cancelled ->
+                "登录已中断：等待确认时与 Steam 的连接断开了。请重试，期间尽量让 App 留在前台。"
+            msg.contains("Cancelled", true) ->
+                "登录请求在手机上被取消了。请重新登录，并在 Steam App 里点「允许」"
+            msg.contains("Expired", true) || msg.contains("Revoked", true) ->
+                "这次登录请求已过期，请重新点登录"
             msg.contains("InvalidPassword", true) || msg.contains("InvalidLoginAuthCode", true) ->
                 "Steam 账号或密码错误"
             msg.contains("TwoFactorCodeMismatch", true) ->
@@ -761,6 +919,11 @@ private class GuardAuthenticator : IAuthenticator {
     override fun getEmailCode(email: String?, previousCodeWasIncorrect: Boolean): CompletableFuture<String> =
         SteamService.requestGuard("email", email.orEmpty())
 
-    override fun acceptDeviceConfirmation(): CompletableFuture<Boolean> =
-        SteamService.requestDeviceConfirmation()
+    override fun acceptDeviceConfirmation(): CompletableFuture<Boolean> {
+        // 用户明确要求改用验证码：拒绝，让 javaSteam 降级到 allowedConfirmations[1]（DeviceCode）。
+        if (SteamService.forceCodeLoginActive()) {
+            return CompletableFuture.completedFuture(false)
+        }
+        return SteamService.requestDeviceConfirmation()
+    }
 }

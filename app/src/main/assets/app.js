@@ -771,7 +771,7 @@ document.getElementById('saveProxyBtn').onclick = () => {
 /* ---- steam ---- */
 let steam = {
   loggedIn: false, busy: false, guard: false, guardType: '', guardEmail: '',
-  account: '', status: '未登录', error: '',
+  codeFallback: false, account: '', status: '未登录', error: '',
 };
 
 window.__steamState = function (st) {
@@ -785,10 +785,12 @@ window.__steamState = function (st) {
   }
 };
 
-window.__steamGuard = function (type, email) {
+window.__steamGuard = function (type, email, codeFallback) {
   steam.guard = true;
   steam.guardType = type || 'device';
   steam.guardEmail = email || '';
+  // 桥接层把「这个账号有没有验证码可退」一并带过来，避免先渲染一次再等状态刷新。
+  if (typeof codeFallback === 'boolean') steam.codeFallback = codeFallback;
   renderSteam();
   document.getElementById('settings').classList.remove('hidden');
   const inp = document.getElementById('steamGuardInput');
@@ -812,13 +814,18 @@ function renderSteam() {
   const codeArea = document.getElementById('steamGuardCodeArea');
   if (codeArea) codeArea.classList.toggle('hidden', isDeviceConfirm);
   const useCodeBtn = document.getElementById('steamUseCodeBtn');
-  if (useCodeBtn) useCodeBtn.classList.toggle('hidden', !isDeviceConfirm);
+  // 账号只允许手机确认时，隐藏降级按钮：点了也只会重建会话再撞回同一堵墙，
+  // 还会让手机上那条待确认请求作废。
+  if (useCodeBtn) useCodeBtn.classList.toggle('hidden', !isDeviceConfirm || !steam.codeFallback);
 
   const hint = document.getElementById('steamGuardHint');
   if (hint && steam.guard) {
     if (isDeviceConfirm) {
-      hint.textContent = '已向你的手机 Steam App 发送确认请求：打开 App 点「允许」即可完成登录。'
-        + '没收到通知可点下面的按钮改用令牌验证码。';
+      hint.textContent = steam.codeFallback
+        ? '已向你的手机 Steam App 发送确认请求：打开 App 点「允许」，本页面会自动继续。'
+          + '没收到通知可点下面的按钮改用令牌验证码。'
+        : '已向你的手机 Steam App 发送确认请求：打开 App 点「允许」，本页面会自动继续。'
+          + '（该账号只能用手机确认，没有验证码可输入）';
     } else {
       hint.textContent = steam.guardType === 'email'
         ? ('验证码已发送到邮箱 ' + (steam.guardEmail || '') + '，请输入')

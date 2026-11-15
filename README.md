@@ -145,10 +145,31 @@ Steam 对开了手机令牌的账号，会返回一组允许的确认方式（`a
 
 1. 手机确认阶段立刻提示「打开手机 App 点允许」，并给出**改用验证码登录**按钮
 2. 点该按钮会取消当前 poll、重新发起一次登录，这次强制走 `DeviceCode`（`forceCodeLogin`），一定拿得到输入框
-3. 若账号只允许手机确认（`allowedConfirmations` 只有一项），会明确报「该账号只允许手机确认登录」
+3. 若账号只允许手机确认（`allowedConfirmations` 里没有 `DeviceCode`/`EmailCode`），降级按钮**直接隐藏**，避免点进死胡同
 4. 登录成功时保存 Steam 下发的 `guardData`（JWT），下次登录少触发一次 2FA；主动登出会连同 token 一起清掉
 
-排查用的日志在 `Android/data/com.prototypejust.weworkshop/files/weworkshop.log`，登录失败会记录完整的异常链和 `allowedConfirmations` 列表。
+### 手机批准了却显示「登录已取消」
+
+这是 0.5.8 修掉的一个误报，原因是 JavaSteam 的轮询会被断线连带取消：
+
+```
+SteamClient.onClientDisconnected()
+  → jobManager.cancelPendingJobs()
+    → AsyncJobSingle.setFailed(dueToRemoteFailure = false)
+      → future.cancel(true)          // poll 请求被 cancel
+        → CancellationException      // 界面翻成「登录已取消」
+```
+
+切到手机 App 点「允许」时，本 App 退到后台，心跳/VPN/路由都可能让长连接断一次。断线本身不影响服务端的认证会话——`requestID` 还在 Steam 那边有效，手机上批准的结果也还在，重连后继续 poll 就能拿到 token。但 javaSteam 会把这次断线当成「取消」，用户什么都没取消却看到「登录已取消」。
+
+0.5.8 起「手机确认」这条路自己轮询：断线后先重连，再用**同一个** `authSession` 继续 poll，手机上的批准不会白费；只有 `Expired` / `Revoked` / `Cancelled` 这类真正作废的结果才终止。
+
+同一版还顺手堵了两个会加剧这个问题的口子：
+
+- 连点登录按钮会并发发起两个认证会话（手机收到两条确认，批错一条就被判 `Cancelled`）——现在用 `claimLogin()` 串行化
+- 启动时的「恢复会话」会和手动登录抢同一条连接和 `logonCallback`——手动登录会先取消恢复任务
+
+排查用的日志在 `Android/data/com.prototypejust.weworkshop/files/weworkshop.log`，登录失败会记录完整的异常链和 `allowedConfirmations` 列表；断线重试会写 `poll: client disconnected, reconnecting` / `poll retry:`。
 
 ## 网络加速（App 内 hosts）
 

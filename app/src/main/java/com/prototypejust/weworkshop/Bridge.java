@@ -56,7 +56,8 @@ public class Bridge {
     private void pushSteamGuard() {
         final String js = "window.__steamGuard && window.__steamGuard("
                 + JSONObject.quote(SteamService.INSTANCE.getGuardType()) + ","
-                + JSONObject.quote(SteamService.INSTANCE.getGuardEmail()) + ")";
+                + JSONObject.quote(SteamService.INSTANCE.getGuardEmail()) + ","
+                + SteamService.INSTANCE.getCodeFallbackAvailable() + ")";
         main.post(() -> webView.evaluateJavascript(js, null));
     }
 

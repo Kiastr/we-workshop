@@ -111,16 +111,33 @@ App 里有两个不同的网络通道，它们**不共用代理设置**：
 1. 点「⚡ 一键测速优选」：并发对每个候选做 **TCP connect + 带 SNI 的 TLS 握手 + 证书域名校验**，只保留整套通过者，按延迟排序选出每个域名的最优 IP。只做 ping 是不够的 —— CDN 边缘 IP 可能能连上却没部署目标域名的证书。
 2. 打开右上角总开关（**默认关闭**，开启前不改任何解析行为）。
 3. 服务卡片可单独开关；「自定义 hosts 条目」优先级最高，可填你所在地区实测可用的 IP。
+4. 若某张卡片显示 **「⚠ 测速无可用 IP」**，说明该域名所有候选都没通过校验 —— 在「自定义 hosts 条目」补一个本地区可用 IP，再点一次测速即可。自定义条目同样会参与 TLS/SNI + 证书校验，输出里能看到 `✓/✗`，不会连错服务器。
+
+### 卡片三态（避免误判）
+
+| 显示 | 含义 |
+| --- | --- |
+| `● 优选 x.x.x.x · N ms` | 该域名已选出可用 IP，映射生效 |
+| `⚠ 测速无可用 IP · 请在下方补一条自定义 hosts` | **测速跑过但该组全失败**，不是「忘了测速」。多半是域名被 DNS 污染、候选 IP 全废 |
+| 灰色「未测速 · …」 | 从未跑过测速（或点了「清除优选」） |
+
+判据 `benched` 由 Java 层持久化到 SharedPreferences，重启 App 后仍准确。测速输出末尾会额外列出「一个可用 IP 都没选出」的域名。
 
 ### 三重安全网
 
 - 默认关闭；未命中规则时 `lookup()` 行为与系统 DNS 完全一致。
-- `lookup()` 把映射 IP 放首位、系统 DNS 解析结果作为后续备选 route，映射 IP 连不上时 OkHttp 自动尝试下一个地址，不会把请求打死。
+- `lookup()` 把映射 IP 放首位、系统 DNS 解析结果作为后续备选 route，映射 IP 连不上时 OkHttp 自动尝试下一个地址，不会把请求打死。**但备选会过滤掉与映射 IP 不同协议族、以及非全局可达的地址**：国内 DNS 常把 `steamcommunity.com` 的 AAAA 投毒到 `2a03:2880::/29`（Meta/Facebook）等无关地址，Android 双栈下又优先尝试 IPv6，把它当 route 追加只会卡满 `connectTimeout(15s)` 并把脏地址报进异常，反而比不加速更慢。
 - 内置候选 IP **只是测速起点，不是固定答案**（不同地区/运营商的最优 CDN 边缘不同，且 IP 会变）。测速失败就不写优选结果，保持系统解析；可随时「清除优选」回到内置候选。
+
+### 跨组复用（自愈）
+
+`candidatesFor()` 会把**其它服务已通过整套校验的 `picks` IP** 也纳入本域名的测速候选。Steam 的 api / store / community / 图片 CDN 常落在同一批 Akamai 边缘，某组测速全失败、其它组成功时，再测一次就能让失败组复用那些已验证 IP；安全性由 `probe()` 保证 —— 它用**本域名**做 SNI 并校验证书，证书不匹配就判 `false`，不会把 GitHub 边缘误选成 `steamcommunity.com` 的可用 IP。候选变多后测速总预算从 12s 提到 20s，单个探测仍受 4s 超时限制。
 
 ### 内置候选 IP 与维护
 
 采集于 2026-11-15，来自开发机 `getent ahostsv4 <域名>` 与 TCP/TLS 连通性实测，写在 `HostsAccelerator.java` 文件头注释与 `SERVICES` 常量里：Steam 社区 / Web API / 商店 / 图片 CDN / GitHub 共 5 组。更新方式：在开发机执行 `getent ahostsv4 <域名>`，挑出能完成 TLS 握手的 IP 填进 `candidates`，**不要写死为唯一值**。
+
+> **`steamcommunity.com` 的内置候选刻意留空**：原值 `162.220.12.226` 实测 TCP `:443` 直接 `ConnectionRefused`。保留一个必然失败的 IP 更糟 —— `mappedIp()` 会返回它、命中计数照涨、UI 看起来「加速已生效」，实际请求秒拒后回退到被投毒的 IPv6 卡满 15s。清空后，未测速时该域名行为与系统 DNS 完全一致（安全网第 1 条），可用 IP 由「跨组复用」+「用户自定义条目」两条路径供给。
 
 ### 作用范围（如实标注）
 
@@ -129,6 +146,25 @@ App 里有两个不同的网络通道，它们**不共用代理设置**：
 | 列表 / 详情（`HttpClient`）、Steam CDN 下载（javaSteam 的 `OkHttpClient`） | WebView 自行加载的远程缩略图、javaSteam 的 Steam CM 长连接（不经 OkHttp 的 `Dns`） |
 
 另外：设置里填了「网络代理（host:port）」时，OkHttp 会让代理服务器负责 DNS，自定义 `Dns` 不会被调用 —— **hosts 加速与网络代理互斥**，两者不要同时开。
+
+### 故障定位：`SocketTimeoutException: failed to connect … after 15000ms`
+
+典型报错（未登录时抓 `steamcommunity.com/workshop/browse/` 的网页回退路径）：
+
+```text
+加载失败：SocketTimeoutException: failed to connect to
+steamcommunity.com/2a03:2880:f136:83:face:b00c:0:25de (port 443)
+from /2409:8962:... (port 43828) after 15000ms
+```
+
+| 观察点 | 判定 |
+| --- | --- |
+| `2a03:2880::/29` | 属 **AS32934 Meta/Facebook**（`face:b00c` 是其接口标识），Valve 在 AS32590/Akamai，`steamcommunity.com` 绝不该解析到这里 → **DNS 投毒** |
+| `from /2409:8962:...` | 运营商 IPv6，说明系统 DNS 返回被投毒的 **AAAA**，Android 优先走 IPv6 撞上脏地址 |
+| `after 15000ms` | 精确等于 `HttpClient` 的 `connectTimeout(15, SECONDS)`，说明是 TCP 连接阶段超时、请求确实经过 Java 层 |
+| 目标是域名直连 :443 | 可排除「设置了 HTTP 代理」（走代理时目标应是代理地址） |
+
+排查顺序：① 看 ⚡ 页「命中次数」是否 > 0（=0 说明总开关没开或该服务被关）；② 看卡片是否为「⚠ 测速无可用 IP」；③ 看「已优选」数量是否少于启用服务数；④ 在自定义条目填一个本地区可用 IP 后重测。注意**未登录**时列表只能走 `steamcommunity.com` 网页抓取这条最容易被污染的路径；登录后的 `QueryFiles` 走 Steam CM 长连接，不受本 `Dns` 影响，是另一条通道。
 
 ## 界面与图标
 

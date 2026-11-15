@@ -306,7 +306,12 @@ async function loadPage() {
   }
   state.loading = false;
   if (!r || !r.ok) {
-    setStatus('加载失败：' + ((r && r.error) || '未知错误'), true);
+    const err = (r && r.error) || '未知错误';
+    // 网络层失败给出可操作的引导，而不是只丢一条 SocketTimeoutException 原文。
+    const netHint = /SocketTimeout|failed to connect|UnknownHost|SSLHandshake|timed out/i.test(err)
+      ? '　·　可到顶栏 ⚡ 网络加速「一键测速优选」，或检查代理 / VPN'
+      : '';
+    setStatus('加载失败：' + err + netHint, true);
     return;
   }
   state.items = r.items || [];

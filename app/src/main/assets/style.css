@@ -881,6 +881,7 @@ body {
 .accel-card-foot { margin-top: 10px; font-size: 11.5px; }
 .accel-picked { color: #7ee0b0; }
 .accel-pending { color: #8b93a7; }
+.accel-failed { color: #ffb26b; font-weight: 600; }
 
 .accel-add { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; margin-top: 10px; }
 .accel-add .setting-input { min-width: 0; font-size: 12px; }

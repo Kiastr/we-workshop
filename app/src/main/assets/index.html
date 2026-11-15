@@ -162,8 +162,11 @@
 
     <div id="accelGuide" class="accel-guide">
       <b>怎么用</b>：先点「一键测速优选」挑出能完成 TLS 握手的边缘 IP，再打开右上角总开关。
-      内置 IP 只是候选起点，会随地区与时间变化；连接失败会自动回退系统解析，不会把网络打死。
+      测速会自动复用其它组已验证的 IP 给失败组再试一次；内置 IP 只是候选起点，会随地区与时间变化。
       <div class="accel-guide-limit">
+        <b>卡片状态</b>：<span style="color:#7ee0b0">● 优选 IP · ms</span> = 已生效；
+        <span style="color:#ffb26b">⚠ 测速无可用 IP</span> = 该组探测全失败，请在下方补一条自定义 hosts；
+        灰色「未测速」= 从未跑过测速。<br>
         <b>作用范围</b>：列表 / 详情 / Steam CDN 下载。<b>不覆盖</b> WebView 远程缩略图与 Steam 长连接；
         若在设置里填了「网络代理」，DNS 由代理服务器解析，本功能不生效。
       </div>

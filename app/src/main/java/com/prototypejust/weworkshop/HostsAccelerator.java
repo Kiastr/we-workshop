@@ -7,11 +7,13 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,7 +61,11 @@ import okhttp3.Dns;
  * <ol>
  *   <li>默认关闭：开启前不会改动任何解析行为。</li>
  *   <li>lookup() 把「映射 IP」放在首位、把系统 DNS 解析结果作为后续备选地址，
- *       映射 IP 连不上时 OkHttp 会自动尝试下一个 route，不会把请求打死。</li>
+ *       映射 IP 连不上时 OkHttp 会自动尝试下一个 route，不会把请求打死。
+ *       <b>但命中映射时会过滤掉被投毒的 AAAA/本地段</b>：国内 DNS 常把
+ *       steamcommunity.com 的 IPv6 解析投到 2a03:2880::/29（Meta/Facebook）等
+ *       完全无关的地址，Android 双栈下又优先尝试 IPv6，把它作为 route 追加
+ *       只会卡满 connectTimeout 并把脏地址报进异常，反而比不加速更慢。</li>
  *   <li>内置候选 IP 只是起点：不同地区/运营商的最优边缘不同，且 IP 会变，
  *       必须以 App 内「一键测速优选」的结果为准，或由用户填写自定义条目。</li>
  * </ol>
@@ -67,12 +73,20 @@ import okhttp3.Dns;
  * <h3>内置候选 IP 的采集方法（便于日后自行维护）</h3>
  * 采集于 2026-11-15，来源为开发机本地 DNS 解析（getent ahostsv4）与 TCP/TLS 连通性实测：
  * <pre>
- *   steamcommunity.com              162.220.12.226
+ *   steamcommunity.com              （内置候选已清空，见下方说明）
  *   api.steampowered.com            104.119.189.147 / .161 / .170   (Akamai)
  *   store.steampowered.com          2.19.102.132                     (Akamai)
  *   steamuserimages-a.akamaihd.net  2.18.244.199 / .221              (Akamai)
  *   github.com                      20.27.177.113 / 140.82.114.4     (实测 HTTP 200)
  * </pre>
+ * <b>为什么 steamcommunity.com 没有内置候选</b>：原先写的 162.220.12.226 实测
+ * 已失效（TCP :443 直接 ConnectionRefused）。把它留在表里更糟 —— mappedIp() 会
+ * 返回一个必然失败的地址、命中计数照常增加，UI 看起来「加速已生效」，实际请求
+ * 秒拒后回退到被投毒的 IPv6 卡满 15s。因此清空，改由两条更可靠的路径供给：
+ * ① 测速时跨组复用其它服务已通过 TLS/SNI + 证书校验的 picks（Steam 各域名常
+ * 落在同一批 Akamai 边缘）；② 用户在「自定义 hosts 条目」填本地区实测可用的 IP。
+ * 两条都由 probe() 的证书校验兜底，不会误连到不承载该域名的服务器。
+ *
  * 更新方式：在开发机执行 {@code getent ahostsv4 <域名>}，把结果里能完成
  * TLS 握手的 IP 填进 {@link #SERVICES} 的 candidates 即可；不要写死为唯一值。
  * 项目实际访问的域名清单见 README「数据源与原理」。
@@ -88,6 +102,8 @@ public final class HostsAccelerator {
     private static final String K_DISABLED = "accel_disabled_services";
     private static final String K_CUSTOM = "accel_custom";
     private static final String K_PICKS = "accel_picks";
+    /** 是否至少跑过一次完整测速，用于 UI 区分「从未测速」与「测过但全失败」。 */
+    private static final String K_BENCHED = "accel_benched";
 
     private static final int PROBE_TIMEOUT_MS = 4000;
     private static final int PROBE_PORT = 443;
@@ -117,10 +133,13 @@ public final class HostsAccelerator {
      * 证书不匹配就不会被选中，也不会被写入 picks。
      */
     private static final Service[] SERVICES = new Service[]{
+            // 内置候选已清空：162.220.12.226 实测 TCP :443 ConnectionRefused。
+            // 保留一个必然失败的 IP 会让 mappedIp() 命中计数照涨、UI 误判「已生效」，
+            // 实际秒拒后回退到被投毒的 IPv6 卡满 15s。改由跨组 picks + 自定义条目供给。
             new Service("steam_community", "Steam 社区 / 创意工坊",
                     "列表网页解析、详情页、工坊浏览",
                     new String[]{"steamcommunity.com"},
-                    new String[]{"162.220.12.226"}),
+                    new String[]{}),
             new Service("steam_api", "Steam Web API",
                     "GetPublishedFileDetails 详情接口",
                     new String[]{"api.steampowered.com"},
@@ -168,6 +187,7 @@ public final class HostsAccelerator {
     }
 
     private static volatile boolean enabled = false;
+    private static volatile boolean benched = false;
     private static final Set<String> disabled = Collections.synchronizedSet(new HashSet<String>());
     private static final Map<String, String> custom = Collections.synchronizedMap(new LinkedHashMap<String, String>());
     private static final Map<String, Pick> picks = Collections.synchronizedMap(new LinkedHashMap<String, Pick>());
@@ -181,6 +201,7 @@ public final class HostsAccelerator {
     public static synchronized void init(Context ctx) {
         prefs = ctx.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         enabled = prefs.getBoolean(K_ENABLED, false);
+        benched = prefs.getBoolean(K_BENCHED, false);
         disabled.clear();
         try {
             JSONArray a = new JSONArray(prefs.getString(K_DISABLED, "[]"));
@@ -227,15 +248,33 @@ public final class HostsAccelerator {
                 system = Collections.emptyList();
             }
             if (ip == null) {
+                // 未命中规则：与系统 DNS 完全一致（三重安全网第 1 条，行为不变）。
                 if (system.isEmpty()) throw new UnknownHostException(hostname);
                 return system;
             }
             // 命中：映射 IP 优先，系统解析结果作为后续备选 route（OkHttp 失败自动回退）。
+            // 但备选只保留「与映射 IP 同协议族、且全局可达」的地址。
+            // 原因：国内 DNS 常把 steamcommunity.com 的 AAAA 投毒到 2a03:2880::/29
+            // （Meta/Facebook）等完全无关的地址，Android 双栈下又优先尝试 IPv6；
+            // 把它作为 route 追加只会卡满 connectTimeout(15s) 并把脏地址报进异常，
+            // 反而比不加速更慢。本项目的映射 IP 目前全是 IPv4，因此这里会滤掉
+            // 被投毒的 AAAA，同时保留 IPv4 备选不破坏安全网。
             hits.incrementAndGet();
+            boolean mappedV6 = ip.indexOf(':') >= 0;
             List<InetAddress> out = new ArrayList<InetAddress>();
             out.add(InetAddress.getByName(ip));
             for (InetAddress a : system) {
-                if (!ip.equals(a.getHostAddress())) out.add(a);
+                String ha = a.getHostAddress();
+                if (ha == null || ip.equals(ha)) continue;
+                if ((ha.indexOf(':') >= 0) != mappedV6) continue;      // 协议族不同，丢弃
+                if (a.isLoopbackAddress() || a.isLinkLocalAddress()
+                        || a.isSiteLocalAddress() || a.isMulticastAddress()
+                        || a.isAnyLocalAddress()) continue;               // 非全局可达，丢弃
+                boolean dup = false;
+                for (InetAddress b : out) {
+                    if (ha.equals(b.getHostAddress())) { dup = true; break; }
+                }
+                if (!dup) out.add(a);
             }
             return out;
         }
@@ -280,6 +319,9 @@ public final class HostsAccelerator {
             root.put("ok", true);
             root.put("enabled", enabled);
             root.put("hits", hits.get());
+            // 供 UI 区分「从未测速」与「测速过但该域名无可用 IP」——这两件事
+            // 以前都显示成「未测速 · 使用内置候选」，会误导用户以为只是忘了点按钮。
+            root.put("benched", benched);
             root.put("note", "hosts 映射只作用于本 App 的 Java 层请求；"
                     + "WebView 远程缩略图与 Steam 长连接不受影响。"
                     + "建议先「一键测速优选」再开启，IP 失效会自动回退系统解析。");
@@ -292,6 +334,7 @@ public final class HostsAccelerator {
                 o.put("desc", s.desc);
                 o.put("domains", join(s.domains));
                 o.put("candidates", join(s.candidates));
+                o.put("hasCandidates", s.candidates.length > 0);
                 o.put("on", !disabled.contains(s.id));
                 Pick p = picks.get(s.domains[0]);
                 o.put("picked", p == null ? "" : p.ip);
@@ -350,7 +393,10 @@ public final class HostsAccelerator {
 
     public static String clearPicks() {
         picks.clear();
-        if (prefs != null) prefs.edit().putString(K_PICKS, "{}").apply();
+        // 清除优选后回到「未测速」状态，UI 不再显示「测速无可用 IP」的告警。
+        benched = false;
+        if (prefs != null) prefs.edit().putString(K_PICKS, "{}")
+                .putBoolean(K_BENCHED, false).apply();
         return "ok";
     }
 
@@ -462,7 +508,9 @@ public final class HostsAccelerator {
         if (!tasks.isEmpty()) {
             ExecutorService ex = Executors.newFixedThreadPool(Math.min(8, Math.max(2, tasks.size())));
             try {
-                List<Future<Probe>> fs = ex.invokeAll(tasks, 12, TimeUnit.SECONDS);
+                // 跨组复用会让候选数比原来多（见 candidatesFor），12s 容易把靠后的
+                // 探测整批 cancel 掉，给到 20s；单个 probe 仍由 PROBE_TIMEOUT_MS 限制。
+                List<Future<Probe>> fs = ex.invokeAll(tasks, 20, TimeUnit.SECONDS);
                 for (Future<Probe> f : fs) {
                     try {
                         if (!f.isCancelled() && f.get() != null) results.add(f.get());
@@ -487,6 +535,10 @@ public final class HostsAccelerator {
             picks.put(normalize(e.getKey()), new Pick(e.getValue().ip, e.getValue().ms));
         }
         savePicks();
+        // 无论结果如何都记下「已经测过」，UI 才能把「测过但这一组没选出 IP」
+        // 与「从未测速」区分开，避免再显示误导性的「未测速 · 使用内置候选」。
+        benched = true;
+        if (prefs != null) prefs.edit().putBoolean(K_BENCHED, true).apply();
 
         try {
             JSONObject root = new JSONObject();
@@ -514,7 +566,23 @@ public final class HostsAccelerator {
     private static List<String> candidatesFor(Service s, String domain) {
         List<String> out = new ArrayList<String>();
         for (String ip : s.candidates) if (!out.contains(ip)) out.add(ip);
+
+        // 跨组复用：把其它服务「已通过 TCP + TLS(SNI) + 证书域名校验」的 picks
+        // 也纳入本域名的测速候选。Steam 的 api / store / community / 图片 CDN
+        // 常落在同一批 Akamai 边缘，某个域名测出的可用 IP 值得让其它域名再试一次。
+        // 这正是「某组测速全失败、其它组成功」时的自愈路径。
+        // 安全性由 probe() 保证：它用本域名做 SNI 并校验证书，证书不匹配就判 false，
+        // 不会把 github.com 的边缘误选成 steamcommunity.com 的可用 IP。
+        // picks 最多 5 个，去重后每个域名多几个探测，8 并发 / 20s 总预算足够。
+        synchronized (picks) {
+            for (Map.Entry<String, Pick> e : picks.entrySet()) {
+                String ip = e.getValue().ip;
+                if (ip != null && !ip.isEmpty() && !out.contains(ip)) out.add(ip);
+            }
+        }
         // 把系统解析结果也纳入对比：如果直连本来就最快，测速结果会等于「无需加速」。
+        // 注意国内 DNS 可能返回被投毒的 AAAA，probe() 会连不上或证书不匹配而判 false，
+        // 因此不会被写成 picks；留着它是为了不漏掉「系统解析本来就可用」的情况。
         try {
             for (InetAddress a : Dns.SYSTEM.lookup(domain)) {
                 String ip = a.getHostAddress();

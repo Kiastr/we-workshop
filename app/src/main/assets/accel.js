@@ -15,7 +15,8 @@
 (function () {
   'use strict';
 
-  var GUIDE_KEY = 'accel_guide_v1';
+  // v2：文案新增「卡片三态」说明（测速失败 ≠ 未测速）。升级 key 让老用户也看到一次。
+  var GUIDE_KEY = 'accel_guide_v2';
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -35,6 +36,24 @@
     } catch (e) {
       return { ok: false, error: String(e) };
     }
+  }
+
+  // 服务卡片底部三态：
+  //   ① 已优选            → 绿色，显示 IP 与延迟
+  //   ② 测过速但无可用 IP  → 告警色，明确提示补自定义条目（旧版误显示为「未测速」）
+  //   ③ 从未测速          → 灰色；无内置候选时额外说明必须靠测速/自定义
+  // 判据 benched 由 Java 层 HostsAccelerator 持久化，重启 App 后仍准确。
+  function foot(s, benched) {
+    if (s.picked) {
+      return '<span class="accel-picked">● 优选 ' + esc(s.picked) +
+          ' · ' + Number(s.ms) + ' ms</span>';
+    }
+    if (benched) {
+      return '<span class="accel-failed">⚠ 测速无可用 IP · 请在下方补一条自定义 hosts</span>';
+    }
+    return s.hasCandidates
+      ? '<span class="accel-pending">未测速 · 使用内置候选</span>'
+      : '<span class="accel-pending">未测速 · 无内置候选，需测速或自定义条目</span>';
   }
 
   function render(cfg) {
@@ -58,11 +77,7 @@
           '</div>' +
           '<div class="accel-card-desc">' + esc(s.desc) + '</div>' +
           '<div class="accel-card-domains">' + esc(s.domains) + '</div>' +
-          '<div class="accel-card-foot">' +
-            (s.picked
-              ? '<span class="accel-picked">● 优选 ' + esc(s.picked) + ' · ' + Number(s.ms) + ' ms</span>'
-              : '<span class="accel-pending">未测速 · 使用内置候选</span>') +
-          '</div>' +
+          '<div class="accel-card-foot">' + foot(s, cfg.benched) + '</div>' +
         '</div>';
     }).join('');
     el('accelOn').textContent = on + ' / ' + services.length;
@@ -141,6 +156,19 @@
       lines.push((p.ok ? '✓ ' : '✗ ') + p.domain + '  ' + p.ip + '  ' + (p.ok ? (p.ms + ' ms') : p.why));
     });
     if (!rs.length) lines.push('（没有可探测的候选，请检查服务开关）');
+    // 把「哪些域名一个可用 IP 都没选出」显式列出来，避免用户只看到「已优选 4」
+    // 却不知道失败的那组才是列表加载失败的原因。
+    var okDomains = {}, failedDomains = [];
+    rs.forEach(function (p) { if (p.ok) okDomains[p.domain] = true; });
+    rs.forEach(function (p) {
+      if (!p.ok && !okDomains[p.domain] && failedDomains.indexOf(p.domain) < 0) {
+        failedDomains.push(p.domain);
+      }
+    });
+    if (failedDomains.length) {
+      lines.push('', '⚠ 这些域名测速无可用 IP：' + failedDomains.join('、'));
+      lines.push('  已自动复用其它组验证过的 IP 参与本轮探测；仍失败时请在下方填本地区可用 IP 后重测。');
+    }
     out.textContent = lines.join('\n');
     refresh();
     toast('测速完成，已选 ' + r.picked + ' 个优选 IP');

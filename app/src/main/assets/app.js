@@ -457,6 +457,11 @@ window.__onBack = function () {
     if (window.__playerBack) window.__playerBack();
     return true;
   }
+  const accel = document.getElementById('accel');
+  if (accel && !accel.classList.contains('hidden')) {
+    if (window.closeAccel) window.closeAccel();
+    return true;
+  }
   const settings = document.getElementById('settings');
   if (settings && !settings.classList.contains('hidden')) {
     closeSettings();

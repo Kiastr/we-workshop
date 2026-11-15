@@ -24,6 +24,7 @@ Wallpaper Engine 没有手机端，创意工坊也只能在 PC 客户端里看�
 - 断点续传 + 失败自动重试（最多 3 次，间隔 3s / 6s / 12s）
 - **本地视频播放**：顶栏 ▶ 打开列表，播放 / 暂停、拖动进度、倍速、全屏、循环
 - **真超分**：Anime4K / FSR / FSRCNNX / AnimeJaNai 共 7 档，实时 WebGL2 渲染，带生效确认、性能看门狗、阶梯降档与 A/B 对比
+- **网络加速（App 内 hosts）**：顶栏 ⚡，5 组服务可独立开关，一键 TLS 测速优选 IP，失败自动回退系统解析
 
 ## 数据源与原理
 
@@ -91,6 +92,49 @@ App 里有两个不同的网络通道，它们**不共用代理设置**：
 
 如果诊断显示 VPN 已连接但依然超时，多半是节点被 Steam 风控，换节点再试。
 
+## 网络加速（App 内 hosts）
+
+顶栏 **⚡** 打开。参考 Watt Toolkit 的「域名 → 优选 IP」思路，但按 Android 的实际约束重新落地。
+
+### 为什么不是 VpnService / 改系统 hosts
+
+| 做法 | 判定 |
+| --- | --- |
+| 改 `/etc/hosts` | 需要 root，排除 |
+| `VpnService` 接管 DNS（最像 Watt Toolkit PC 版） | Android 同时只允许一个 VPN，会**顶掉你为了访问 Steam 已开的 VPN/TUN**，反而让 App 彻底连不上，排除 |
+| **App 内自定义 DNS（`okhttp3.Dns`）** | 无需权限、不抢 VPN、不改系统，TLS 仍按原域名做 SNI 与证书校验，**采用** |
+
+映射只发生在 App 自己的解析层：`lookup()` 返回「映射 IP」作为首选地址，OkHttp 仍用 URL 里的原域名做 SNI 和 `HostnameVerifier` 校验，所以不会破坏 HTTPS。为此 `HttpClient` 从 `HttpURLConnection` 迁移到 OkHttp（对外 `get/post` 签名与 UTF-8 解码行为不变），javaSteam 的 CDN client 也挂了同一个 `Dns`。
+
+### 怎么用
+
+1. 点「⚡ 一键测速优选」：并发对每个候选做 **TCP connect + 带 SNI 的 TLS 握手 + 证书域名校验**，只保留整套通过者，按延迟排序选出每个域名的最优 IP。只做 ping 是不够的 —— CDN 边缘 IP 可能能连上却没部署目标域名的证书。
+2. 打开右上角总开关（**默认关闭**，开启前不改任何解析行为）。
+3. 服务卡片可单独开关；「自定义 hosts 条目」优先级最高，可填你所在地区实测可用的 IP。
+
+### 三重安全网
+
+- 默认关闭；未命中规则时 `lookup()` 行为与系统 DNS 完全一致。
+- `lookup()` 把映射 IP 放首位、系统 DNS 解析结果作为后续备选 route，映射 IP 连不上时 OkHttp 自动尝试下一个地址，不会把请求打死。
+- 内置候选 IP **只是测速起点，不是固定答案**（不同地区/运营商的最优 CDN 边缘不同，且 IP 会变）。测速失败就不写优选结果，保持系统解析；可随时「清除优选」回到内置候选。
+
+### 内置候选 IP 与维护
+
+采集于 2026-11-15，来自开发机 `getent ahostsv4 <域名>` 与 TCP/TLS 连通性实测，写在 `HostsAccelerator.java` 文件头注释与 `SERVICES` 常量里：Steam 社区 / Web API / 商店 / 图片 CDN / GitHub 共 5 组。更新方式：在开发机执行 `getent ahostsv4 <域名>`，挑出能完成 TLS 握手的 IP 填进 `candidates`，**不要写死为唯一值**。
+
+### 作用范围（如实标注）
+
+| 生效 | 不生效 |
+| --- | --- |
+| 列表 / 详情（`HttpClient`）、Steam CDN 下载（javaSteam 的 `OkHttpClient`） | WebView 自行加载的远程缩略图、javaSteam 的 Steam CM 长连接（不经 OkHttp 的 `Dns`） |
+
+另外：设置里填了「网络代理（host:port）」时，OkHttp 会让代理服务器负责 DNS，自定义 `Dns` 不会被调用 —— **hosts 加速与网络代理互斥**，两者不要同时开。
+
+## 界面与图标
+
+- UI 采用深空底 + 青→紫品牌渐变的覆盖式设计层（`style.css` 末尾「设计系统覆盖层」），保留原有全部 class/id 结构；加速页带首次使用引导横幅（app 内引导与本文成对交付）。
+- 桌面图标由 `tools/gen_icon.py` **用代码绘制**（不依赖 AI 生成图片）：深空渐变底 + 渐变圆角块 + 播放三角，与顶栏品牌块、CSS 配色一致。产出 5 个密度的 `ic_launcher` / `ic_launcher_round` / adaptive 前后景，以及 `mipmap-anydpi-v26` 的自适应图标 XML。改配色需同时改 `style.css` 的 `--cyan` / `--violet` / `--grad` 与 `gen_icon.py` 的 `BRAND_C0` / `BRAND_C1`。
+
 ## 构建
 
 需要 JDK 17 与 Android SDK（compileSdk 35、build-tools 35.0.0）。在根目录创建 `local.properties`：
@@ -140,6 +184,17 @@ python3 tools/gen_assets.py
 
 新增或替换 shader：把 `.glsl` 放进 `tools/sources/` 对应子目录 → 在 `gen_assets.py` 的 `FILES` 登记 → 在 `TIERS` 的 `chain` 引用 → 重跑脚本。`hook.js` 会自动按 `//!` 指令解析，通常无需改 JS。
 
+### 桌面图标
+
+`res/mipmap-*` 下的 PNG 由 `tools/gen_icon.py` 生成，**勿手改**：
+
+```bash
+python3 -m pip install --break-system-packages pillow numpy
+python3 tools/gen_icon.py
+```
+
+脚本是确定性的，重复运行产出 byte-identical；配色常量与设计约定见「界面与图标」。
+
 ## 验证工具（改动超分代码后请全部跑一遍）
 
 | 命令 | 作用 | 通过标准 |
@@ -147,6 +202,7 @@ python3 tools/gen_assets.py
 | `python3 tools/verify_ajn.py` | 用 ONNX Runtime 作基准，逐层验证 AnimeJaNai GLSL 卷积链数值等价 | 10 层 + 最终输出 maxdiff < 1e-4 |
 | `python3 tools/verify_shaders.py` | mesa EGL/GLES3 **真实编译 + link** 所有翻译后的 shader | `compile FAIL 0` 且 `link FAIL 0` |
 | `python3 tools/gen_assets.py` | 重生成资源 | 与仓库内文件 byte-identical |
+| `python3 tools/gen_icon.py` | 重生成桌面图标 | 与仓库内 PNG byte-identical |
 
 `verify_shaders.py` 需要 Linux + mesa 的 `libEGL` / `libGLESv2` + Node（WSL / Linux CI 均可）；它内部调用 `tools/export_shaders.js` 从 `hook.js` / `animejanai.js` / `renderer.js` 导出真正喂给 WebGL2 的源码，覆盖所有档位链与 MRT 变体。Android 真机仍需在 WebView 里做一次目视验收。
 
@@ -157,6 +213,7 @@ python3 tools/gen_assets.py
 - `javaSteam` 负责 Steam 登录（含 Steam Guard）与 CDN 下载
 - 播放：`LocalVideoServer`（回环 HTTP + Range/206 + CORS）→ `<video>` → WebGL2 纹理
 - 超分：`sr/hook.js`（mpv hook → GLSL ES 3.00 翻译）、`sr/animejanai.js`（ONNX → GLSL 卷积链）、`sr/renderer.js`（FBO ping-pong）、`sr/controller.js`（看门狗/降档）、`sr/surface.js`（尺寸锁定）
+- 加速：`HostsAccelerator`（okhttp3.Dns + TLS/SNI 测速优选）、`accel.js`（服务卡片 / 开关 / 自定义 hosts 条目）
 
 ## 第三方许可
 

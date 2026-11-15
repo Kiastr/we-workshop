@@ -42,7 +42,7 @@ public class MainActivity extends Activity {
         safeBottomPx = navBarHeightPx();
 
         webView = new WebView(this);
-        webView.setBackgroundColor(Color.parseColor("#0E0F13"));
+        webView.setBackgroundColor(Color.parseColor("#0A0D16"));
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -76,6 +76,7 @@ public class MainActivity extends Activity {
             android.os.Process.killProcess(android.os.Process.myPid());
             System.exit(10);
         });
+        HostsAccelerator.init(this);
         Bridge.applySavedProxy(this);
         bridge.initSteam();
 

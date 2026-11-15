@@ -505,6 +505,9 @@ object SteamService {
         val http = okhttp3.OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(90, TimeUnit.SECONDS)
+            // javaSteam 的 CDN manifest/chunk 下载走这个 client，挂同一个 hosts DNS，
+            // 让 Steam CDN 域名也能用上测速优选出来的边缘 IP。
+            .dns(com.prototypejust.weworkshop.HostsAccelerator.dns())
             .apply { if (proxy != null) proxy(proxy) }
             .addInterceptor { chain ->
                 val req = chain.request()

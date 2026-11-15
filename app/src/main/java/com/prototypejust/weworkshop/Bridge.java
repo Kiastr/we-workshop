@@ -108,6 +108,45 @@ public class Bridge {
         return "ok";
     }
 
+    /* ---- 网络加速（hosts 映射）---- */
+
+    /** 读取配置：总开关、服务卡片、优选结果、自定义条目、命中次数。 */
+    @JavascriptInterface
+    public String accelConfig() {
+        return HostsAccelerator.configJson();
+    }
+
+    @JavascriptInterface
+    public String accelSetEnabled(boolean on) {
+        return HostsAccelerator.setEnabled(on);
+    }
+
+    @JavascriptInterface
+    public String accelSetService(String id, boolean on) {
+        return HostsAccelerator.setService(id, on);
+    }
+
+    @JavascriptInterface
+    public String accelAddRule(String domain, String ip) {
+        return HostsAccelerator.addRule(domain, ip);
+    }
+
+    @JavascriptInterface
+    public String accelRemoveRule(String domain) {
+        return HostsAccelerator.removeRule(domain);
+    }
+
+    @JavascriptInterface
+    public String accelClearPicks() {
+        return HostsAccelerator.clearPicks();
+    }
+
+    /** TLS 探测可能耗时数秒，必须走后台线程；结果经 window.__bridgeResult 回传。 */
+    @JavascriptInterface
+    public void accelBenchmark(String cb) {
+        pool.execute(() -> reply(cb, HostsAccelerator.benchmark()));
+    }
+
     private void reply(String cb, String json) {
         final String js = "window.__bridgeResult(" + JSONObject.quote(cb) + "," + json + ")";
         main.post(() -> webView.evaluateJavascript(js, null));

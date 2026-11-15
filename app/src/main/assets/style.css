@@ -935,3 +935,225 @@ body {
   .brand span:last-child { display: none; }
   .accel-add { grid-template-columns: 1fr; }
 }
+
+/* =========================================================================
+   设计系统覆盖层（v3）—— 依据 Material 3 / Apple HIG 的审查结果落地
+   -------------------------------------------------------------------------
+   与 v2 一样只做覆盖：不改任何 class/id、不改 JS 依赖的 DOM 结构。
+   本次针对审查发现的 6 个真实问题：
+     1. 缩略图 1:1 正方形裁切严重 —— 壁纸预览原生 16:9，改 16:10 兼顾密度与真实感
+     2. 加载只有一行「加载中…」—— 补骨架屏 shimmer，降低感知等待
+     3. .icon-btn 32px 小于 Apple HIG 44px / Material 48dp 触控下限
+        —— 用 ::before 扩大热区，视觉尺寸不变（M3 的 touch-target 与视觉分离做法）
+     4. 字号 10/11/12.5/12.8/13.5/14/16.5/17 八级混用 —— 收敛成 4 级 type scale
+     5. 无焦点环、无入场动效、无图片淡入、无 reduced-motion 支持
+     6. 语义色散在硬编码里 —— 收进 token
+   性能约束：所有动画只用 transform / opacity（超分在跑时 GPU 已经很忙），
+   不做 blur 动画、不做 box-shadow 动画。
+   ========================================================================= */
+:root {
+  /* 语义色（Material 3 语义角色，深色主题取高明度变体保证对比度） */
+  --success: #7ee0b0;
+  --warning: #ffd08a;
+  --danger: #ff8f9e;
+  --success-dim: rgba(126, 224, 176, .12);
+  --warning-dim: rgba(255, 208, 138, .12);
+  --danger-dim: rgba(255, 143, 158, .12);
+
+  /* 表面分层（M3 surface-container 思路：越高层越亮，用于表达层级而非靠阴影堆叠） */
+  --surface-1: rgba(255, 255, 255, .035);
+  --surface-2: rgba(255, 255, 255, .06);
+  --surface-3: rgba(255, 255, 255, .09);
+
+  /* 4pt 间距网格（Apple HIG / Material 共用基准） */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+
+  /* 4 级 type scale：正文 / 次要 / 标题 / 展示 */
+  --fs-caption: 11.5px;
+  --fs-secondary: 12.5px;
+  --fs-body: 14px;
+  --fs-title: 15px;
+
+  /* 动效曲线与时长（Material Motion：标准 / 减速 / 弹性） */
+  --ease-standard: cubic-bezier(.2, 0, 0, 1);
+  --ease-decelerate: cubic-bezier(0, 0, .2, 1);
+  --ease-spring: cubic-bezier(.34, 1.4, .64, 1);
+  --dur-fast: 140ms;
+  --dur-base: 220ms;
+  --dur-slow: 340ms;
+}
+
+/* --- 文字渲染：深色底上让细字不发虚 --- */
+body {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-size: var(--fs-body);
+  line-height: 1.55;
+}
+
+/* --- 触控热区：视觉仍是 32px，可点区域扩到 44px（HIG 下限） ---
+   用 ::before 而非直接放大按钮，避免顶栏 4 个图标把搜索框挤没。 */
+.icon-btn { position: relative; }
+.icon-btn::before {
+  content: '';
+  position: absolute;
+  inset: -6px;                 /* 32 + 12 = 44px 触控区 */
+  border-radius: 14px;
+}
+.chip { min-height: 30px; display: inline-flex; align-items: center; }
+.tab { min-height: 32px; }
+
+/* --- 焦点环：无障碍必须。只在外接键盘/辅助功能触发时出现，不影响触摸体验 --- */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+/* --- 搜索框占位文字：实测唯一不达 AA 的文本 ---
+   原 #6b7385 在 #1a1d25 上只有 3.54:1（WCAG 公式实测）。
+   提到 #93a0b8 后：原底色 6.39:1 / v2 合成底色 #151820 上 6.73:1，均超 AA。
+   比正文用的 --muted(#98a4bd) 略暗，保持「占位提示应弱于正文」的层级。 */
+.search-wrap input::placeholder { color: #93a0b8; opacity: 1; }
+
+/* --- 列表卡片：缩略图比例 + 间距网格 + 层级 --- */
+#list { gap: var(--sp-3); padding: var(--sp-3) var(--sp-3) var(--sp-2); }
+.card {
+  border-radius: 16px;
+  background: var(--surface-1);
+  border: 1px solid rgba(255, 255, 255, .07);
+  /* 入场动效：交错淡入 + 轻微上浮。仅 transform/opacity，不触发重排 */
+  animation: cardIn var(--dur-slow) var(--ease-decelerate) both;
+  will-change: transform;
+}
+.thumb {
+  /* 16:10：比原来的 1:1 更接近壁纸真实比例，同时比 16:9 保留更多纵向信息 */
+  aspect-ratio: 16 / 10;
+  background: linear-gradient(150deg, #131826, #0d1019);
+}
+.thumb img {
+  /* 图片淡入：未加载完成时透明，避免突兀地"啪"一下出现。
+     JS 在 onload 时加 .is-loaded；onerror 时【不加】，保持透明让 .thumb 的
+     渐变占位底露出来（比 WebView 默认破图图标好看，国内缩略图失败很常见） */
+  opacity: 0;
+  transform: scale(1.02);
+  transition: opacity var(--dur-base) var(--ease-standard),
+              transform var(--dur-slow) var(--ease-decelerate);
+}
+.thumb img.is-loaded { opacity: 1; transform: scale(1); }
+.meta { padding: var(--sp-3) var(--sp-3) var(--sp-3); }
+.title {
+  font-size: var(--fs-secondary);
+  line-height: 1.42;
+  letter-spacing: .01em;
+  min-height: 2.84em;          /* 与 line-height 同步，保持两行占位 */
+}
+.sub {
+  font-size: var(--fs-caption);
+  color: #9aa7c0;              /* WCAG 实测：原 #7d859a 为 4.82:1(已 AA)，提亮后 7.33:1(AAA) */
+  margin-top: var(--sp-1);
+}
+.type-badge {
+  background: rgba(8, 11, 18, .68);
+  border: 1px solid rgba(255, 255, 255, .12);
+  letter-spacing: .04em;
+}
+
+/* 交错入场：只给前 12 个卡片递增延迟，长列表后面的卡片不再等待 */
+.card:nth-child(1) { animation-delay: 0ms; }
+.card:nth-child(2) { animation-delay: 30ms; }
+.card:nth-child(3) { animation-delay: 60ms; }
+.card:nth-child(4) { animation-delay: 90ms; }
+.card:nth-child(5) { animation-delay: 120ms; }
+.card:nth-child(6) { animation-delay: 150ms; }
+.card:nth-child(7) { animation-delay: 180ms; }
+.card:nth-child(8) { animation-delay: 210ms; }
+.card:nth-child(n+9) { animation-delay: 240ms; }
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* --- 骨架屏：加载时的占位，比一行「加载中…」感知更快 ---
+   #skeleton 由 JS 填入 .skel-card，网格参数与 #list 对齐避免跳动 */
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
+}
+.skel-card {
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--surface-1);
+  border: 1px solid rgba(255, 255, 255, .06);
+}
+.skel {
+  background: linear-gradient(90deg,
+    rgba(255, 255, 255, .045) 25%,
+    rgba(255, 255, 255, .10) 50%,
+    rgba(255, 255, 255, .045) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+.skel-thumb { aspect-ratio: 16 / 10; width: 100%; }
+.skel-body { padding: var(--sp-3); }
+.skel-line { height: 11px; border-radius: 6px; }
+.skel-line + .skel-line { margin-top: var(--sp-2); }
+@keyframes shimmer {
+  from { background-position: 180% 0; }
+  to { background-position: -80% 0; }
+}
+
+/* --- 状态条：语义色进 token，错误/空状态有明确区分 --- */
+.status {
+  font-size: var(--fs-secondary);
+  line-height: 1.7;
+  padding: var(--sp-4) var(--sp-4);
+  color: var(--muted);
+}
+.status.error {
+  color: var(--danger);
+  background: var(--danger-dim);
+  border: 1px solid rgba(255, 143, 158, .22);
+  border-radius: 14px;
+  margin: var(--sp-3);
+}
+
+/* --- 按钮与控件的 disabled 统一（M3：禁用态用透明度而非换色） --- */
+.btn-primary:disabled, .btn-ghost:disabled, .btn-stream:disabled,
+.icon-btn:disabled, .tab:disabled, .chip:disabled {
+  opacity: .42;
+  cursor: default;
+}
+.btn-primary, .btn-ghost, .btn-stream, .chip, .tab {
+  transition: transform var(--dur-fast) var(--ease-standard),
+              background var(--dur-fast) var(--ease-standard),
+              border-color var(--dur-fast) var(--ease-standard),
+              box-shadow var(--dur-fast) var(--ease-standard),
+              opacity var(--dur-fast) var(--ease-standard);
+}
+.btn-primary:active:not(:disabled), .btn-ghost:active:not(:disabled) { transform: scale(.97); }
+
+/* --- 下载进度条：加水位光泽，让「边下边看」的可播区间更直观 --- */
+.dl-bar { border-radius: 999px; overflow: hidden; }
+#dlBarFill { transition: width var(--dur-base) var(--ease-standard); }
+
+/* --- 弹层：统一用减速曲线入场，时长一致。
+   排除 .accel-body：它在 v2 已有专属的 accelModalIn 动画，不能覆盖掉 --- */
+.modal:not(.hidden) .modal-body:not(.accel-body) {
+  animation: cardIn var(--dur-base) var(--ease-decelerate) both;
+}
+
+/* --- 无障碍：尊重系统的「减少动态效果」设置（Android  animator_duration_scale=0 时 WebView 会置 reduce） --- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  .card { animation: none; will-change: auto; }
+  .thumb img { opacity: 1; transform: none; }
+  .skel { animation: none; background: rgba(255, 255, 255, .06); }
+}

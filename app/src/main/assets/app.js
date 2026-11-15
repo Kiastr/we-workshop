@@ -162,6 +162,44 @@ function setStatus(text, isError) {
   el.className = 'status' + (isError ? ' error' : '');
 }
 
+/* ---- 骨架屏（加载占位） ----
+   只有「整页加载」才显示：翻页/换排序时列表会被清空，用骨架代替一行「加载中…」
+   能明显降低感知等待。子项用 DOM API 创建，不拼 innerHTML，保持与 render() 一致。 */
+let _skelFilled = false;
+function showSkeleton() {
+  const box = document.getElementById('skeleton');
+  if (!box) return;
+  if (!_skelFilled) {
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < 6; i++) {
+      const card = document.createElement('div');
+      card.className = 'skel-card';
+      const thumb = document.createElement('div');
+      thumb.className = 'skel skel-thumb';
+      const body = document.createElement('div');
+      body.className = 'skel-body';
+      const l1 = document.createElement('div');
+      l1.className = 'skel skel-line';
+      l1.style.width = '88%';
+      const l2 = document.createElement('div');
+      l2.className = 'skel skel-line';
+      l2.style.width = '58%';
+      body.appendChild(l1);
+      body.appendChild(l2);
+      card.appendChild(thumb);
+      card.appendChild(body);
+      frag.appendChild(card);
+    }
+    box.appendChild(frag);
+    _skelFilled = true;
+  }
+  box.classList.remove('hidden');
+}
+function hideSkeleton() {
+  const box = document.getElementById('skeleton');
+  if (box) box.classList.add('hidden');
+}
+
 function render() {
   const list = document.getElementById('list');
   const frag = document.createDocumentFragment();
@@ -178,6 +216,11 @@ function render() {
     thumb.className = 'thumb';
     const img = document.createElement('img');
     img.loading = 'lazy';
+    img.decoding = 'async';
+    // 图片淡入：加载完成后才从透明过渡进来，避免突兀地"啪"一下出现。
+    // onerror 时【不加】is-loaded：保持透明，露出 .thumb 的渐变占位底，
+    // 比 WebView 默认的破图图标好看得多（国内网络下缩略图失败很常见）。
+    img.onload = () => { img.classList.add('is-loaded'); };
     img.src = it.img || d.preview_url || '';
     img.alt = it.title || '';
     thumb.appendChild(img);
@@ -278,8 +321,10 @@ async function loadPage() {
   state.loading = true;
   setStatus('加载中…');
   document.getElementById('list').innerHTML = '';
+  showSkeleton();
   const combos = buildTagCombos();
   if (combos.length > MAX_TAG_COMBOS) {
+    hideSkeleton();
     state.loading = false;
     setStatus('标签组合太多（' + combos.length + ' 种查询），请减少选择', true);
     return;
@@ -304,6 +349,7 @@ async function loadPage() {
       r = mergeResults(rs2);
     }
   }
+  hideSkeleton();
   state.loading = false;
   if (!r || !r.ok) {
     const err = (r && r.error) || '未知错误';

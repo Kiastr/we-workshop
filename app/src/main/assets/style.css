@@ -900,6 +900,36 @@ body {
 }
 .accel-empty { padding: 14px; text-align: center; font-size: 12px; color: var(--muted); border: 1px dashed var(--line); border-radius: 12px; }
 
+/* ---- 边下边看（详情页进度条下方 + 播放列表徽标） ---- */
+.dl-stream-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 10px;
+}
+.btn-stream {
+  flex: none; padding: 8px 16px; border: 0; border-radius: 12px;
+  background: var(--grad); color: #0a0d16; font-size: 13px; font-weight: 700;
+  cursor: pointer; box-shadow: 0 6px 18px rgba(90, 209, 255, .22);
+}
+.btn-stream:active { transform: translateY(1px); }
+.btn-stream:disabled {
+  background: rgba(255, 255, 255, .07); color: var(--muted);
+  box-shadow: none; cursor: default;
+}
+.dl-stream-hint { font-size: 11px; color: var(--muted); line-height: 1.5; }
+.dl-stream-guide {
+  margin-top: 10px; padding: 12px 14px; border-radius: 12px;
+  background: rgba(90, 209, 255, .07); border: 1px solid rgba(90, 209, 255, .28);
+  font-size: 11.5px; line-height: 1.7; color: var(--text);
+}
+.dl-stream-guide b { color: var(--cyan); }
+.dl-stream-guide .btn-ghost { display: block; margin-top: 8px; padding: 5px 12px; font-size: 11.5px; }
+.pv-badge {
+  display: inline-block; margin-right: 7px; padding: 1px 7px; border-radius: 999px;
+  background: var(--grad); color: #0a0d16; font-size: 10px; font-weight: 700;
+  vertical-align: middle;
+}
+.pv-badge-off { background: rgba(255, 255, 255, .1); color: var(--muted); }
+.pv-locked { opacity: .58; }
+
 @media (max-width: 370px) {
   /* 极窄屏：顶栏 4 个图标按钮 + 搜索框，收起品牌文字避免挤压 */
   .brand span:last-child { display: none; }

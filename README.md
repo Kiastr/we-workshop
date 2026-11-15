@@ -23,6 +23,7 @@ Wallpaper Engine 没有手机端，创意工坊也只能在 PC 客户端里看�
 - 下载列表：进度、取消、失败重试、打开所在文件夹
 - 断点续传 + 失败自动重试（最多 3 次，间隔 3s / 6s / 12s）
 - **本地视频播放**：顶栏 ▶ 打开列表，播放 / 暂停、拖动进度、倍速、全屏、循环
+- **边下边看**：下载过程中即可预览（不必等下载完成），沿用同一套 WebGL2 超分管线；索引在文件尾部的视频会自动禁用并提示
 - **真超分**：Anime4K / FSR / FSRCNNX / AnimeJaNai 共 7 档，实时 WebGL2 渲染，带生效确认、性能看门狗、阶梯降档与 A/B 对比
 - **网络加速（App 内 hosts）**：顶栏 ⚡，5 组服务可独立开关，一键 TLS 测速优选 IP，失败自动回退系统解析
 
@@ -32,6 +33,7 @@ Wallpaper Engine 没有手机端，创意工坊也只能在 PC 客户端里看�
 - **详情**：`ISteamRemoteStorage/GetPublishedFileDetails` 接口 + Steam 社区页面
 - **下载**：`javaSteam` 建立 Steam 连接 → 获取 depot 密钥 / CDN 节点 / manifest 授权码 → 从 Steam CDN 下载 manifest 与分块 → AES 解密 + zstd/xz 解压 → 写入 `Download/Wallpaper WE/`
 - **播放**：`LocalVideoServer` 在 `127.0.0.1` 起一个仅本机可访问的 HTTP 服务，把 `Download/Wallpaper WE/` 下的视频以 Range/206 流喂给隐藏的 `<video>`；视频帧上传为 WebGL 纹理，超分后画到 `<canvas>`
+- **边下边看**：`StreamRegistry` 逐 chunk 登记已写入区间、算出「连续可读水位」，`LocalVideoServer` 的 `/stream/<itemId>` 把 Range 裁剪到水位并阻塞等待下载推进；下载完成后按文件名切到 MediaStore 成品续播
 - **网络**：需要能访问 Steam（国内需代理或 VPN，手机开全局代理 / TUN 模式即可）；播放与超分全程离线，不联网
 
 ## 本地视频播放与真超分
@@ -72,6 +74,41 @@ Anime4K / FSR / FSRCNNX 官方发布的是 **mpv `//!HOOK` 语法**（不是标�
 - 需要 WebGL2 + `EXT_color_buffer_float`；不满足时自动只保留「原画 / FSR」
 - 神经超分建议 ≤720p 源，1080p 及以上会受限或禁用
 - `<video crossorigin="anonymous">` 必须保留：本地 HTTP 流靠 CORS 头避免 WebGL 取帧污染 canvas
+- 边下边看只对 **moov 在文件头部的 MP4**（faststart）可用；索引在尾部的视频必须下载完才能播，UI 会明确说明。运行时扫描文件头的 box 顺序来判定，不依赖任何格式预设，也不会对视频做转码或压缩
+
+## 边下边看（边下载边预览）
+
+详情页下载进度条下方出现「▶ **边看边下**」即可在下载过程中预览；顶栏 ▶ 播放列表里也会列出「下载中」条目。播放页与成品播放完全一致（档位 / 倍速 / 全屏 / A/B 都可用），因为流式 URL 只是换了一个数据源，仍走同一套 `<video>` → WebGL2 超分管线。
+
+### 为什么不影响下载速度
+
+**下载模式原样保留**：仍是 manifest 里 chunk 按 offset 排序后分 4 路并行、断点续传（`.chunks` 逐 chunk 记录）、SHA-1 校验、`copyToDownloads` 落盘。`WorkshopDownloader` 只多了四处登记钩子（`begin` / 每 chunk 后 `mark` / `finish` / `abort`），不改分组策略、不改并行度、不改顺序。
+
+关键点：4 路是**交错分配**（`groups[i % 4]`），每组内部按 offset 递增串行，因此「从 0 起连续可读的前缀」几乎跟随总完成量推进（模拟 92%~100%），不需要改成顺序下载。水位 = 所有已登记区间串起来的连续前缀，**不能用文件长度判断**——稀疏写入时尾部可能先写满、中间还是空洞，按长度读会花屏。这和下载器里断点续传不能只看文件长度是同一个坑。
+
+### 三层机制
+
+| 层 | 位置 | 作用 |
+| --- | --- | --- |
+| 水位登记 | `StreamRegistry.java` | 逐 chunk 记录 `[offset, length)`，合并算连续前缀；`await()` / `notifyAll()` 让 HTTP 请求等数据而不是报错 |
+| 流式端点 | `LocalVideoServer.java` `/stream/<itemId>` | 把 Range 的 end 裁剪到 `waterline-1`；`Content-Range` 的 total 仍是完整文件大小（播放器据此显示总时长）；等待上限 12s，超时返回 `503 + Retry-After` 让播放器重发 Range。**独立线程池**，避免阻塞占死成品播放的 4 线程 |
+| 前端 | `app.js` / `player.js` / `index.html` | 进度回调里轮询 `Bridge.streamingVideo(itemId)`，`ready=true` 才亮按钮；首次可用给一次性引导；播放列表里未就绪条目禁用点击并给出原因 |
+
+### 格式限制（重要）
+
+Steam 官方商店页与 Wiki 一致说明：**创意工坊仅放行 `.mp4`**，本地文件才支持 webm/avi/mov/m4v/wmv。所以下载到的基本都是 MP4。但「MP4」不保证能边下边看——若 `moov` 原子在文件尾部（非 faststart），播放器必须先读到尾部索引才能起播，此时边下边看在原理上不成立。
+
+处理方式是**运行时探测**：`StreamRegistry` 扫描 staging 文件头的 MP4 box 顺序（`ftyp` → `moov` 即 faststart；`mdat` 先出现则说明 moov 在后面），只需每个 box 的 8 字节头可读、几百 KB 就能出结论。非 faststart 或非 MP4 一律保守禁用按钮并提示「需下载完才能播放」。**不对视频做任何压缩或转码**——Steam CDN 的 `compressedLength` 只是传输层压缩，`DepotChunk.process` 已解密解压还原成原始字节，落盘文件与作者上传的字节级一致；转码要引入 ffmpeg，会破坏既定 `WebView + WebGL2` 架构。
+
+### 下载完成后不中断
+
+下载完成后 `staging.deleteRecursively()` 会删掉正在播放的源文件。因此 `finish()` 之后，`LocalVideoServer` 会重新枚举 MediaStore、按文件名找到已落盘的成品（此时 `IS_PENDING` 已置 0），后续 Range 直接复用 `serveVideo()` 走成品，播放无缝续上，磁盘上也不会多留一份副本。
+
+### 已知限制
+
+- 预览期间**不要把进度条拖到尚未下载的位置**：该区间会返回 503 让播放器重试，可能卡顿；等下载追上即可恢复
+- moov 在尾部的视频会退化为「下载完再播」，这是容器格式决定，不是故障
+- 断点续传时水位从 `.chunks` 记录重建，不影响已下载部分的预览
 
 ## 常见问题：开着 VPN 但 Steam 登录失败
 
@@ -248,6 +285,7 @@ python3 tools/gen_icon.py
 - 单 Activity + WebView，前端为 `assets/` 下的 HTML/CSS/JS
 - `javaSteam` 负责 Steam 登录（含 Steam Guard）与 CDN 下载
 - 播放：`LocalVideoServer`（回环 HTTP + Range/206 + CORS）→ `<video>` → WebGL2 纹理
+- 边下边看：`StreamRegistry`（逐 chunk 水位登记 / await-notify / MP4 box 顺序探测）+ `LocalVideoServer` 的 `/stream/<itemId>`（Range 裁剪 + 独立线程池）
 - 超分：`sr/hook.js`（mpv hook → GLSL ES 3.00 翻译）、`sr/animejanai.js`（ONNX → GLSL 卷积链）、`sr/renderer.js`（FBO ping-pong）、`sr/controller.js`（看门狗/降档）、`sr/surface.js`（尺寸锁定）
 - 加速：`HostsAccelerator`（okhttp3.Dns + TLS/SNI 测速优选）、`accel.js`（服务卡片 / 开关 / 自定义 hosts 条目）
 

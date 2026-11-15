@@ -77,6 +77,16 @@
       <div id="dlProgress" class="dl-progress hidden">
         <div class="dl-bar"><div id="dlBarFill"></div></div>
         <div id="dlText" class="dl-text"></div>
+        <div id="dlStreamRow" class="dl-stream-row hidden">
+          <button id="dlStreamBtn" class="btn-stream" title="下载过程中即可预览，不必等下载完成">▶ 边看边下</button>
+          <span id="dlStreamHint" class="dl-stream-hint"></span>
+        </div>
+        <div id="dlStreamGuide" class="dl-stream-guide hidden">
+          <b>边下边看</b>：下载到一定程度就能先预览，不必等全部下完。
+          仅对索引在文件头部的视频可用（创意工坊视频多为 MP4）；若显示「需下载完才能播放」，
+          说明该文件的索引在尾部，属正常限制。预览期间请勿把进度条拖到尚未下载的位置。
+          <button id="dlStreamGuideBtn" class="btn-ghost">知道了</button>
+        </div>
       </div>
       <div class="detail-actions">
         <button id="openSteamBtn" class="btn-primary">在 Steam 中打开</button>

@@ -365,6 +365,22 @@ public class Bridge {
         return srv.listJson();
     }
 
+    /** 边下边看：查询某条正在下载的工坊条目能否现在就预览。
+     *  返回 StreamRegistry.statusJson 的 {ok,ready,faststart,url,waterline,total,reason,...}。
+     *  前端在下载进度回调里轮询；ready=true 才显示「边看边下」按钮。
+     *  只有纯数字 itemId 会被接受，不含任何文件路径。 */
+    @JavascriptInterface
+    public String streamingVideo(String itemId) {
+        try {
+            long id = Long.parseLong(itemId);
+            LocalVideoServer srv = LocalVideoServer.get(activity);
+            if (srv == null) return "{\"ok\":false,\"reason\":\"视频服务启动失败\"}";
+            return StreamRegistry.statusJson(id, srv.baseUrl());
+        } catch (NumberFormatException e) {
+            return "{\"ok\":false,\"reason\":\"参数错误\"}";
+        }
+    }
+
     @JavascriptInterface
     public void removeDownload(String itemId) {
         try {

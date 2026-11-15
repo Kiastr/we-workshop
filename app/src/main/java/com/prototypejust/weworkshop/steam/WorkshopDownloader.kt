@@ -9,6 +9,7 @@ import android.util.Log
 
 import com.prototypejust.weworkshop.DownloadService
 import com.prototypejust.weworkshop.DownloadStore
+import com.prototypejust.weworkshop.StreamRegistry
 import `in`.dragonbra.javasteam.enums.EDepotFileFlag
 import `in`.dragonbra.javasteam.enums.EResult
 import `in`.dragonbra.javasteam.steam.cdn.Client
@@ -136,6 +137,9 @@ object WorkshopDownloader {
     @JvmStatic
     fun cancel(itemId: Long) {
         cancelledItems.add(itemId)
+        // 边下边看：立即唤醒正在等水位的 Loopback HTTP 连接，让它们尽快报错退出，
+        // 而不是一直挂到 await 超时（取消是用户主动行为，无需等协程 finally）。
+        StreamRegistry.abort(itemId)
         // 立即把「已取消」推到界面和下载记录，不必等阻塞中的网络请求返回
         val lp = lastProgress[itemId]
         emit(Progress(itemId, lp?.received ?: 0L, lp?.total ?: 0L, "已取消", error = "已取消"))
@@ -288,6 +292,9 @@ object WorkshopDownloader {
             } finally {
                 activeItems.remove(itemId)
                 jobs.remove(itemId)
+                // 边下边看：兜底唤醒等待中的流式连接。成功时 download() 已 finish()
+                // （isDone=true 不会误伤）；失败 / 重试耗尽 / 异常退出时则 abort。
+                if (!StreamRegistry.isDone(itemId)) StreamRegistry.abort(itemId)
                 if (activeItems.isEmpty()) {
                     DownloadService.stop(context.applicationContext)
                 }
@@ -454,6 +461,31 @@ object WorkshopDownloader {
             Log.i(TAG, rl); logFile(context, rl)
         }
 
+        // 边下边看：选第一个视频文件作为流式预览目标并登记到 StreamRegistry。
+        // 只做登记，不改变下面的 4 路并行分组、chunk 顺序、校验与落盘逻辑。
+        // 多文件时只跟踪第一个 —— 各文件的 chunk.offset 都从 0 起，混在一起会把
+        // 连续可读水位算错；创意工坊视频壁纸通常也就一个视频文件。
+        val streamFile = videoFiles.firstOrNull() ?: filesToDownload.firstOrNull()
+        val streamName = streamFile?.fileName
+        if (streamFile != null) {
+            StreamRegistry.begin(
+                itemId,
+                File(staging, sanitizePath(streamFile.fileName)),
+                streamFile.totalSize,
+                streamFile.fileName,
+                guessMime(streamFile.fileName),
+                titles[itemId],
+                images[itemId]
+            )
+            // 断点续传：.chunks 里已完成的 chunk 也要补登记，否则水位从 0 起，
+            // 前面明明有数据却读不到（续传场景必须重建连续前缀）。
+            for (ch in streamFile.chunks) {
+                if (done.contains(streamFile.fileName + "|" + ch.offset)) {
+                    StreamRegistry.mark(itemId, ch.offset, ch.uncompressedLength.toLong())
+                }
+            }
+        }
+
         var received = existingBytes
         emit(Progress(itemId, received, totalBytes, if (existingBytes > 0) "继续下载" else "开始下载"))
 
@@ -511,6 +543,12 @@ object WorkshopDownloader {
                                 raf.seek(chunk.offset)
                                 raf.write(plain, 0, written)
                                 journal.add(file.fileName + "|" + chunk.offset)
+                                // 边下边看：登记这个区间已写入，推进连续可读水位，
+                                // 并唤醒正在等这段数据的 Loopback HTTP 请求。
+                                // 注意用实际写入的 written，不是 chunk.uncompressedLength。
+                                if (streamName != null && file.fileName == streamName) {
+                                    StreamRegistry.mark(itemId, chunk.offset, written.toLong())
+                                }
                                 val total = counter.addAndGet(written.toLong())
                                 val now = System.currentTimeMillis()
                                 // 节流：最多每 250ms 刷新一次界面 & 落盘，避免频繁回调造成卡顿
@@ -534,6 +572,10 @@ object WorkshopDownloader {
         journal.flush()
         emit(Progress(itemId, received, totalBytes, "保存到 Download…"))
         val target = copyToDownloads(context, itemId, staging)
+        // 边下边看：成品已落盘（MediaStore 的 IS_PENDING 已置 0），标记下载完成。
+        // 之后 staging 会被删掉，LocalVideoServer 会按文件名切到成品继续供流，
+        // 所以 finish 必须放在 copyToDownloads 之后。
+        StreamRegistry.finish(itemId)
         staging.deleteRecursively()
         Log.i(TAG, "saved to $target")
         emit(Progress(itemId, received, totalBytes, "已保存：$target", done = true))

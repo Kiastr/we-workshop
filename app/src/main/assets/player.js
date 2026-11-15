@@ -70,6 +70,16 @@
     $('player').classList.add('hidden');
   }
 
+  /** 边下边看：从详情页「边看边下」按钮直接进入播放页（跳过列表选择）。
+   *  item 由 app.js 用 Bridge.streamingVideo() 的状态组装，含 url/name/title/mime/size。
+   *  复用既有 playVideo → initPipeline → WebGL2 超分链路，无需为流式另写一套渲染。 */
+  global.__playStream = function (item) {
+    if (!item || !item.url) return;
+    P.open = true;
+    $('player').classList.remove('hidden');
+    playVideo(item);
+  };
+
   /** 返回键：播放页先回列表，列表页才关闭。供 app.js 的 __onBack 调用。 */
   global.__playerBack = function () {
     if (!P.open) return false;
@@ -105,16 +115,31 @@
         var thumb = v.img
           ? '<img src="' + esc(v.img) + '" alt="" loading="lazy">'
           : '<div class="pv-ph">▶</div>';
-        return '<div class="pv-item" data-i="' + i + '">'
+        var streaming = !!v.streaming;
+        var locked = streaming && !v.ready;   // moov 在尾部 / 水位不足：不可点
+        var badge = streaming
+          ? '<span class="pv-badge' + (v.ready ? '' : ' pv-badge-off') + '">'
+            + (v.ready ? '边下边看' : '下载中') + '</span>'
+          : '';
+        var sub = streaming
+          ? esc(v.reason || '正在下载') + ' · ' + fmtSize(v.waterline) + ' / ' + fmtSize(v.total)
+          : (esc(v.name) + ' · ' + fmtSize(v.size) + ' · ' + esc(v.mime));
+        return '<div class="pv-item' + (locked ? ' pv-locked' : '') + '" data-i="' + i + '">'
           + '<div class="pv-thumb">' + thumb + '</div>'
           + '<div class="pv-meta">'
-          + '<div class="pv-title">' + esc(v.title || v.name) + '</div>'
-          + '<div class="pv-sub">' + esc(v.name) + ' · ' + fmtSize(v.size)
-          + ' · ' + esc(v.mime) + '</div>'
-          + '</div><div class="pv-go">播放</div></div>';
+          + '<div class="pv-title">' + badge + esc(v.title || v.name) + '</div>'
+          + '<div class="pv-sub">' + sub + '</div>'
+          + '</div><div class="pv-go">' + (locked ? '稍候' : '播放') + '</div></div>';
       }).join('');
       box.querySelectorAll('.pv-item').forEach(function (el) {
-        el.onclick = function () { playVideo(P.videos[Number(el.dataset.i)]); };
+        el.onclick = function () {
+          var v = P.videos[Number(el.dataset.i)];
+          if (v && v.streaming && !v.ready) {   // 未就绪：给出原因，不进播放页
+            try { if (window.Bridge.toast) window.Bridge.toast(v.reason || '还在下载，稍候再试'); } catch (e) { }
+            return;
+          }
+          playVideo(v);
+        };
       });
     }
     // 模型与许可清单（app 内展示，与 README 一致）

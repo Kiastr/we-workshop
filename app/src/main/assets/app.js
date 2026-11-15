@@ -390,7 +390,78 @@ function renderDetailProgress(p) {
     text.textContent = (p.phase || '下载中') + ' ' + pct + '%'
       + (p.total ? '（' + fmtSize(p.received) + ' / ' + fmtSize(p.total) + '）' : '');
   }
+  syncStreamUi(p);
 }
+
+/* ---- 边下边看：由 native StreamRegistry 决定能否现在预览 ----
+   下载完成后按钮消失（成品去 ▶ 播放列表看）；moov 在尾部的视频会显示
+   「需下载完才能播放」，属容器格式限制，不是故障。 */
+let _streamUiAt = 0;
+function syncStreamUi(p) {
+  const row = document.getElementById('dlStreamRow');
+  const btn = document.getElementById('dlStreamBtn');
+  const hint = document.getElementById('dlStreamHint');
+  if (!row || !btn || !hint) return;
+  // 只在当前详情页对应的条目上显示
+  const isCurrent = state.detailId != null && String(p.itemId) === String(state.detailId);
+  if (!isCurrent || p.done || p.error || !window.Bridge.streamingVideo) {
+    row.classList.add('hidden');
+    btn.disabled = true;
+    return;
+  }
+  // 节流：状态探测涉及读文件头，500ms 一次足够，避免每个进度回调都调 native
+  const now = Date.now();
+  if (now - _streamUiAt < 500) return;
+  _streamUiAt = now;
+  let st = null;
+  try { st = JSON.parse(window.Bridge.streamingVideo(String(p.itemId)) || '{}'); } catch (e) { }
+  if (!st || !st.ok) { row.classList.add('hidden'); btn.disabled = true; return; }
+
+  row.classList.remove('hidden');
+  btn.dataset.url = st.url || '';
+  btn.dataset.title = st.title || st.name || '边看边下';
+  btn.dataset.name = st.name || '';
+  btn.dataset.mime = st.mime || 'video/mp4';
+  btn.dataset.size = String(st.total || 0);
+  btn.disabled = !st.ready;
+  btn.textContent = st.ready ? '▶ 边看边下' : '预览准备中…';
+  hint.textContent = st.ready
+    ? ('已可播放 ' + fmtSize(st.waterline) + ' / ' + fmtSize(st.total) + '，请勿拖到未下载处')
+    : (st.reason || '正在准备…');
+  // 首次可用时给一次性引导（localStorage 标记，与 README 成对）
+  if (st.ready) {
+    try {
+      const g = document.getElementById('dlStreamGuide');
+      if (g && !localStorage.getItem('stream_guide_v1')) {
+        g.classList.remove('hidden');
+      }
+    } catch (e) { }
+  }
+}
+
+function bindStreamUi() {
+  const btn = document.getElementById('dlStreamBtn');
+  const gbtn = document.getElementById('dlStreamGuideBtn');
+  if (btn) {
+    btn.onclick = function () {
+      if (this.disabled || !this.dataset.url) return;
+      const item = {
+        url: this.dataset.url, name: this.dataset.name,
+        title: this.dataset.title, mime: this.dataset.mime,
+        size: Number(this.dataset.size) || 0, streaming: true
+      };
+      if (window.__playStream) window.__playStream(item);
+    };
+  }
+  if (gbtn) {
+    gbtn.onclick = function () {
+      document.getElementById('dlStreamGuide').classList.add('hidden');
+      try { localStorage.setItem('stream_guide_v1', '1'); } catch (e) { }
+    };
+  }
+}
+// app.js 在 body 末尾加载，DOM 已就绪，直接绑定即可。
+bindStreamUi();
 
 // 打开详情时按当前条目重置进度条，避免显示其他任务的进度
 function resetDetailProgress(id) {

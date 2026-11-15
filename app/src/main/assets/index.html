@@ -127,10 +127,15 @@
     </div>
     <div id="steamGuardBox" class="hidden">
       <p class="setting-hint" id="steamGuardHint">请输入 Steam Guard 验证码</p>
-      <input id="steamGuardInput" class="setting-input" type="text" inputmode="numeric"
-             placeholder="验证码" autocomplete="off">
+      <div id="steamGuardCodeArea">
+        <input id="steamGuardInput" class="setting-input" type="text" inputmode="numeric"
+               placeholder="验证码" autocomplete="off">
+        <div class="detail-actions">
+          <button id="steamGuardBtn" class="btn-primary">提交验证码</button>
+        </div>
+      </div>
       <div class="detail-actions">
-        <button id="steamGuardBtn" class="btn-primary">提交验证码</button>
+        <button id="steamUseCodeBtn" class="btn-ghost hidden">改用验证码登录</button>
       </div>
     </div>
     <p class="setting-hint">账号密码仅用于向 Steam 换取登录令牌，令牌保存在本机，不会上传到其他服务器。</p>

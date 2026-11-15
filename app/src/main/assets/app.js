@@ -792,7 +792,8 @@ window.__steamGuard = function (type, email) {
   renderSteam();
   document.getElementById('settings').classList.remove('hidden');
   const inp = document.getElementById('steamGuardInput');
-  if (inp) { inp.value = ''; inp.focus(); }
+  // 手机确认没有码可输，别把焦点抢到空输入框上
+  if (inp && steam.guardType !== 'device_confirm') { inp.value = ''; inp.focus(); }
 };
 
 function renderSteam() {
@@ -804,11 +805,25 @@ function renderSteam() {
   document.getElementById('steamLoggedIn').classList.toggle('hidden', !steam.loggedIn);
   const guardBox = document.getElementById('steamGuardBox');
   guardBox.classList.toggle('hidden', !steam.guard || !!steam.loggedIn);
+
+  // 「手机确认」和「验证码」是两条互斥的路：前者没有码可输，只提示 + 给降级入口；
+  // 后者要输入框。混在一起会让用户对着一个空的验证码框发呆。
+  const isDeviceConfirm = steam.guard && steam.guardType === 'device_confirm';
+  const codeArea = document.getElementById('steamGuardCodeArea');
+  if (codeArea) codeArea.classList.toggle('hidden', isDeviceConfirm);
+  const useCodeBtn = document.getElementById('steamUseCodeBtn');
+  if (useCodeBtn) useCodeBtn.classList.toggle('hidden', !isDeviceConfirm);
+
   const hint = document.getElementById('steamGuardHint');
   if (hint && steam.guard) {
-    hint.textContent = steam.guardType === 'email'
-      ? ('验证码已发送到邮箱 ' + (steam.guardEmail || '') + '，请输入')
-      : '请在 Steam 手机上确认登录，或输入手机令牌验证码';
+    if (isDeviceConfirm) {
+      hint.textContent = '已向你的手机 Steam App 发送确认请求：打开 App 点「允许」即可完成登录。'
+        + '没收到通知可点下面的按钮改用令牌验证码。';
+    } else {
+      hint.textContent = steam.guardType === 'email'
+        ? ('验证码已发送到邮箱 ' + (steam.guardEmail || '') + '，请输入')
+        : '请输入手机 Steam App 上显示的 5 位令牌验证码';
+    }
   }
   const user = document.getElementById('steamUser');
   const pass = document.getElementById('steamPass');
@@ -826,6 +841,10 @@ document.getElementById('steamGuardBtn').onclick = () => {
   const c = document.getElementById('steamGuardInput').value.trim();
   if (!c) return;
   window.Bridge.steamGuard(c);
+};
+
+document.getElementById('steamUseCodeBtn').onclick = () => {
+  window.Bridge.steamUseCodeLogin();
 };
 
 document.getElementById('steamLogoutBtn').onclick = () => window.Bridge.steamLogout();

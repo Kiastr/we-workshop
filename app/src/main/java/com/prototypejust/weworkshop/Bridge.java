@@ -203,6 +203,12 @@ public class Bridge {
         SteamService.submitGuardCode(code == null ? "" : code);
     }
 
+    /** 放弃「手机确认」，改用 5 位令牌验证码登录（会中断当前等待并重新发起登录）。 */
+    @JavascriptInterface
+    public void steamUseCodeLogin() {
+        SteamService.useCodeLogin();
+    }
+
     @JavascriptInterface
     public void steamLogout() {
         SteamService.logout();

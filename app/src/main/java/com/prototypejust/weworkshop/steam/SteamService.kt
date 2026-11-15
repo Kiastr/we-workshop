@@ -90,6 +90,23 @@ object SteamService {
     @Volatile private var logonCallback: LoggedOnCallback? = null
     @Volatile private var guardFuture: CompletableFuture<String>? = null
 
+    /**
+     * 本次登录是否跳过「手机确认」，直接走验证码。
+     *
+     * javaSteam 的 AuthSession.pollingWaitForResult() 会先看 allowedConfirmations[0]：
+     * 手机令牌账号这一项通常是 DeviceConfirmation，此时它会调 IAuthenticator.acceptDeviceConfirmation()，
+     * 返回 true 就进入 pollDeviceConfirmation() 的 while(true) 死等——没有任何回调、没有任何超时，
+     * 用户在没收到手机弹窗时只能干等到外层 600s 超时，表现就是「一直转圈然后登录失败」。
+     * 返回 false 则降级到 allowedConfirmations[1]（DeviceCode），由 UI 收验证码，这条路径一定能走通。
+     */
+    @Volatile private var forceCodeLogin = false
+
+    /** UI 点了「改用验证码」：需要中断当前正在等待手机确认的登录，重来一次。 */
+    @Volatile private var codeLoginRequested = false
+
+    /** 正在等待手机确认的 poll future，取消它才能让 .get() 立刻返回。 */
+    @Volatile private var pollFuture: CompletableFuture<*>? = null
+
     // ---------------- 生命周期 ----------------
 
     /** 应用启动时调用；若本地有 refreshToken 会后台自动恢复会话。 */
@@ -139,12 +156,17 @@ object SteamService {
         scope.launch { login(username, password) }
     }
 
-    /** 用户名密码登录（含 Guard 等待）。返回是否成功。 */
-    suspend fun login(username: String, password: String): Boolean {
+    /**
+     * 用户名密码登录（含 Guard 等待）。返回是否成功。
+     *
+     * @param forceCode 跳过「手机确认」，直接要验证码。UI 点「改用验证码」后由 [login] 内部重试时传 true。
+     */
+    suspend fun login(username: String, password: String, forceCode: Boolean = false): Boolean {
         if (busy) return false
         busy = true
         error = ""
         guardNeeded = false
+        forceCodeLogin = forceCode
         try {
             withContext(Dispatchers.IO) {
                 status = "正在连接 Steam…"
@@ -163,13 +185,30 @@ object SteamService {
                     this.deviceFriendlyName = "WE Workshop Android"
                     this.clientOSType = EOSType.AndroidUnknown
                     this.authenticator = GuardAuthenticator()
+                    // Steam 在上一次登录后会给一段 guardData（JWT），带上它能少触发一次 2FA。
+                    // 以前没存，导致每次换设备/换网络都要重新验证。
+                    this.guardData = prefs?.getString("guard_data", null)
                 }
                 val authSession = client!!.authentication
                     .beginAuthSessionViaCredentials(details)
                     .get(60, TimeUnit.SECONDS)
+                // 把 Steam 允许的验证方式写进日志：手机确认 / 手机令牌 / 邮箱，决定后面走哪条路。
+                runCatching {
+                    val kinds = authSession.allowedConfirmations.joinToString(",") {
+                        it.confirmationType.name.removePrefix("k_EAuthSessionGuardType_")
+                    }
+                    fileLog("allowedConfirmations=[$kinds]")
+                }
                 status = "等待 Steam 验证…"
                 notifyState()
-                val poll = authSession.pollingWaitForResult().get(600, TimeUnit.SECONDS)
+                val pf = authSession.pollingWaitForResult()
+                pollFuture = pf
+                val poll = pf.get(600, TimeUnit.SECONDS)
+                pollFuture = null
+                // guardData 会随登录下发，存下来减少下次 2FA。
+                poll.newGuardData?.takeIf { it.isNotBlank() }?.let {
+                    prefs?.edit()?.putString("guard_data", it)?.apply()
+                }
                 val token = poll.refreshToken.orEmpty()
                 val account = poll.accountName?.takeIf { it.isNotBlank() } ?: username.trim()
                 if (token.isBlank()) throw IllegalStateException("Steam 未返回登录令牌")
@@ -186,8 +225,16 @@ object SteamService {
             }
             return true
         } catch (t: Throwable) {
+            // 用户点了「改用验证码」：当前这轮是被我们主动取消的，不是真失败，直接带 forceCode 重来。
+            if (codeLoginRequested) {
+                codeLoginRequested = false
+                pollFuture = null
+                busy = false
+                fileLog("switch to code login, retrying")
+                return login(username, password, forceCode = true)
+            }
             Log.e(TAG, "login failed", t)
-            fileLog("login failed: ${t.javaClass.simpleName}: ${t.message}")
+            fileLog("login failed: ${describeChain(t)}")
             isLoggedIn = false
             error = friendlyError(t)
             status = error
@@ -261,6 +308,23 @@ object SteamService {
         f.complete(trimmed)
     }
 
+    /**
+     * 用户点「改用验证码」：中断正在等待的手机确认，带验证码重新走一遍登录。
+     *
+     * 取消 poll future 会让 login() 里的 .get() 抛 CancellationException，
+     * catch 分支看到 codeLoginRequested 就知道这是主动切换，于是带上 forceCode 重试。
+     */
+    @JvmStatic
+    fun useCodeLogin() {
+        if (!guardNeeded || guardType != "device_confirm") return
+        codeLoginRequested = true
+        guardNeeded = false
+        fileLog("user chose code login over device confirmation")
+        status = "正在改用验证码登录…"
+        notifyState()
+        pollFuture?.cancel(true)
+    }
+
     @JvmStatic
     fun logout() {
         scope.launch {
@@ -272,7 +336,13 @@ object SteamService {
             accountName = ""
             refreshToken = ""
             reconnectJob?.cancel()
-            prefs?.edit()?.remove("refresh_token")?.remove("account_name")?.apply()
+            // 主动登出说明用户可能要换账号：清干净令牌与登录中间态，别让上一次的 forceCode 串到下一次。
+            guardNeeded = false
+            guardType = ""
+            forceCodeLogin = false
+            codeLoginRequested = false
+            pollFuture = null
+            prefs?.edit()?.remove("refresh_token")?.remove("account_name")?.remove("guard_data")?.apply()
             status = "未登录"
             notifyState()
         }
@@ -363,6 +433,31 @@ object SteamService {
         notifyGuard()
         notifyState()
         return f
+    }
+
+    /**
+     * Steam 允许「手机确认」时由 javaSteam 调用。
+     *
+     * 关键：返回 true 后 javaSteam 会进入无限轮询（pollDeviceConfirmation 的 while(true)），
+     * 不会再有别的回调。必须在这一刻让 UI 知道「去手机上点确认」，否则用户只会看到一个
+     * 一直不变的「等待 Steam 验证…」。
+     *
+     * 用户体验过「没用」而点了「改用验证码」时 [forceCodeLogin] 为 true，这里直接拒绝，
+     * 让 javaSteam 降级到 allowedConfirmations[1]（DeviceCode），由 UI 收 5 位令牌码。
+     */
+    internal fun requestDeviceConfirmation(): CompletableFuture<Boolean> {
+        if (forceCodeLogin) {
+            fileLog("device confirmation declined (force code login)")
+            return CompletableFuture.completedFuture(false)
+        }
+        guardType = "device_confirm"
+        guardEmail = ""
+        guardNeeded = true
+        status = "请在手机 Steam App 中确认本次登录"
+        fileLog("device confirmation requested")
+        notifyGuard()
+        notifyState()
+        return CompletableFuture.completedFuture(true)
     }
 
     // ---------------- 创意工坊查询（与 Steam 客户端一致的数据源） ----------------
@@ -604,14 +699,55 @@ object SteamService {
         throw IllegalStateException("Steam 登录超时")
     }
 
+    /**
+     * 把异常链拍平成一行，写日志用。
+     *
+     * javaSteam 的 .get() 抛的是 ExecutionException，真正原因埋在 cause 里；
+     * 只记外层 message 会得到「java.lang.Exception: xxx」这种看不出所以然的东西。
+     */
+    private fun describeChain(t: Throwable): String {
+        val parts = ArrayList<String>()
+        var cur: Throwable? = t
+        var guard = 0
+        while (cur != null && guard < 6) {
+            parts.add(cur.javaClass.simpleName + (cur.message?.let { ": $it" } ?: ""))
+            cur = cur.cause
+            guard++
+        }
+        return parts.joinToString(" <- ")
+    }
+
     private fun friendlyError(t: Throwable): String {
-        val msg = t.message ?: "登录失败"
+        val chain = ArrayList<Throwable>()
+        var cur: Throwable? = t
+        var guard = 0
+        while (cur != null && guard < 6) {
+            chain.add(cur)
+            cur = cur.cause
+            guard++
+        }
+        val msg = chain.joinToString(" / ") { it.message ?: "" }
+        val timedOut = chain.any { it is java.util.concurrent.TimeoutException }
+        val cancelled = chain.any { it is java.util.concurrent.CancellationException }
+
         return when {
-            msg.contains("InvalidPassword", true) -> "Steam 账号或密码错误"
-            msg.contains("TwoFactor", true) || msg.contains("SteamGuard", true) ->
-                "Steam Guard 验证失败，请重试"
-            msg.contains("Proxy", true) || msg.contains("connect", true) ->
+            timedOut ->
+                "Steam 验证超时（10 分钟没等到确认）。若手机没弹出确认框，请重试并点「改用验证码登录」。"
+            cancelled -> "登录已取消"
+            msg.contains("InvalidPassword", true) || msg.contains("InvalidLoginAuthCode", true) ->
+                "Steam 账号或密码错误"
+            msg.contains("TwoFactorCodeMismatch", true) ->
+                "令牌验证码不正确，请输入手机 Steam App 上当前的 5 位码"
+            msg.contains("AccountLoginDeniedNeedTwoFactor", true) -> "该账号需要 Steam Guard 令牌验证码"
+            msg.contains("AccountLogonDenied", true) -> "需要邮箱验证码"
+            msg.contains("RateLimitExceeded", true) -> "登录尝试过于频繁，请过几分钟再试"
+            msg.contains("AccessDenied", true) -> "Steam 拒绝了本次登录（AccessDenied）"
+            msg.contains("no other confirmation types", true) ->
+                "该账号只允许手机确认登录，请在手机 Steam App 中操作"
+            msg.contains("connect", true) || msg.contains("UnknownHost", true) ||
+                msg.contains("SocketTimeout", true) ->
                 "连接 Steam 失败：$msg"
+            msg.isBlank() -> "登录失败（${t.javaClass.simpleName}，详见日志）"
             else -> msg
         }
     }
@@ -626,5 +762,5 @@ private class GuardAuthenticator : IAuthenticator {
         SteamService.requestGuard("email", email.orEmpty())
 
     override fun acceptDeviceConfirmation(): CompletableFuture<Boolean> =
-        CompletableFuture.completedFuture(true)
+        SteamService.requestDeviceConfirmation()
 }

@@ -129,6 +129,27 @@ App 里有两个不同的网络通道，它们**不共用代理设置**：
 
 如果诊断显示 VPN 已连接但依然超时，多半是节点被 Steam 风控，换节点再试。
 
+## 常见问题：一直停在「等待 Steam 验证…」
+
+Steam 对开了手机令牌的账号，会返回一组允许的确认方式（`allowedConfirmations`），javaSteam 按固定优先级只走**第一种**：
+
+| 方式 | javaSteam 的行为 | 界面表现 |
+| --- | --- | --- |
+| `DeviceConfirmation` | 调 `acceptDeviceConfirmation()`，返回 true 后进入 `while(true)` 轮询，**没有任何回调，也没有超时** | 提示「已向手机 App 发送确认请求」+「改用验证码登录」 |
+| `DeviceCode` | 调 `getDeviceCode()` 等界面给码 | 5 位令牌验证码输入框 |
+| `EmailCode` | 调 `getEmailCode()`，带上收件邮箱 | 邮箱验证码输入框 |
+
+旧版本对这三种情况都返回「接受手机确认」，却没有任何界面提示：手机没弹窗（未装 App、通知被折叠、不在同一网络）时，界面只会一直显示「等待 Steam 验证…」，10 分钟后退化成一句「登录失败」。
+
+现在的处理：
+
+1. 手机确认阶段立刻提示「打开手机 App 点允许」，并给出**改用验证码登录**按钮
+2. 点该按钮会取消当前 poll、重新发起一次登录，这次强制走 `DeviceCode`（`forceCodeLogin`），一定拿得到输入框
+3. 若账号只允许手机确认（`allowedConfirmations` 只有一项），会明确报「该账号只允许手机确认登录」
+4. 登录成功时保存 Steam 下发的 `guardData`（JWT），下次登录少触发一次 2FA；主动登出会连同 token 一起清掉
+
+排查用的日志在 `Android/data/com.prototypejust.weworkshop/files/weworkshop.log`，登录失败会记录完整的异常链和 `allowedConfirmations` 列表。
+
 ## 网络加速（App 内 hosts）
 
 顶栏 **⚡** 打开。参考 Watt Toolkit 的「域名 → 优选 IP」思路，但按 Android 的实际约束重新落地。

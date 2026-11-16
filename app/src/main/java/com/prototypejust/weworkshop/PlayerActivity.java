@@ -25,7 +25,6 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
@@ -33,6 +32,7 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
 import androidx.media3.common.util.UnstableApi;
+import androidx.media3.exoplayer.DecoderReuseEvaluation;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.SeekParameters;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
@@ -149,7 +149,7 @@ public class PlayerActivity extends Activity {
     }
 
     @Override
-    protected void onCreate(@Nullable Bundle savedInstanceState) {
+    protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         String url = getIntent().getStringExtra(EXTRA_URL);
@@ -278,7 +278,7 @@ public class PlayerActivity extends Activity {
         player.addAnalyticsListener(new AnalyticsListener() {
             @Override
             public void onVideoInputFormatChanged(EventTime eventTime, Format format,
-                                                  @Nullable androidx.media3.common.DecoderReuseEvaluation reuse) {
+                                                  DecoderReuseEvaluation reuse) {
                 videoFrameRate = format.frameRate == Format.NO_VALUE ? 0f : format.frameRate;
                 inputSummary = format.width + "x" + format.height
                         + (videoFrameRate > 0 ? "@" + Math.round(videoFrameRate) : "")

@@ -405,6 +405,9 @@ public class Bridge {
             // 从非主线程 startActivity 在部分 ROM 上会被后台启动限制拦掉或行为异常。
             main.post(() -> {
                 if (activity.isFinishing() || activity.isDestroyed()) return;
+                // 起播前清掉上一次的失败标记：前端会在回到前台时读它决定是否回退，
+                // 残留值会让一次早就过去的失败把这次的正常播放顶掉。
+                PlayerActivity.STARTUP_ERROR = null;
                 try {
                     activity.startActivity(intent);
                 } catch (Throwable t) {

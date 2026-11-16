@@ -211,7 +211,7 @@
    *    - 定时器：播放页根本没来得及抢焦点就挂了（失败发生在 startActivity 之后极短时间内）
    */
   var nativeFallbackTimer = null;
-  var nativeFallbackBound = false;
+  var nativeFocusHandler = null;
   // 每次起播自增。回退检查只在"还是这一次起播"时才生效，
   // 否则用户连续点两个视频时，前一个的失败回调会把后一个顶掉。
   var nativePlayToken = 0;
@@ -222,11 +222,14 @@
 
     var token = ++nativePlayToken;
 
+    // 注意：必须用模块级变量记住注册的那个 handler。
+    // 每次起播都会生成新的闭包，如果 disarm 里 remove 的是「当前闭包」的 onFocus，
+    // 上一轮注册的监听就永远摘不掉，会积累成幽灵回调。
     function disarm() {
       if (nativeFallbackTimer) { clearTimeout(nativeFallbackTimer); nativeFallbackTimer = null; }
-      if (nativeFallbackBound) {
-        window.removeEventListener('focus', onFocus);
-        nativeFallbackBound = false;
+      if (nativeFocusHandler) {
+        window.removeEventListener('focus', nativeFocusHandler);
+        nativeFocusHandler = null;
       }
     }
 
@@ -244,12 +247,15 @@
     function onFocus() { setTimeout(check, 260); }
 
     disarm();
+    nativeFocusHandler = onFocus;
     window.addEventListener('focus', onFocus);
-    nativeFallbackBound = true;
     nativeFallbackTimer = setTimeout(function () {
       nativeFallbackTimer = null;
-      // 1.6s 还没失败，说明播放页站住了，撤掉焦点监听，避免以后正常返回时误触发
-      if (!check()) disarm();
+      // 1.6s 没失败说明播放页站住了：撤掉定时器，但焦点监听再留 20 秒，
+      // 覆盖"低端机启动慢、1.6s 之后才抛异常"的情况。
+      // 起播前 Bridge 已经把上一轮的失败标记清掉，所以这里不会读到旧值。
+      if (check()) return;
+      setTimeout(function () { if (token === nativePlayToken) disarm(); }, 20000);
     }, 1600);
   }
 

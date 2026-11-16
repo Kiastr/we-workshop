@@ -12,13 +12,18 @@
 
 | 决策 | 内容 |
 | --- | --- |
-| 播放内核 | Media3 ExoPlayer 1.11.x（稳定版），硬解直出 SurfaceView |
+| 播放内核 | Media3 ExoPlayer **1.8.1**，硬解直出 SurfaceView |
 | 原画路径 | **不挂任何 `GlEffect`**，`setVideoEffects(emptyList())`，零额外 GPU 开销 |
 | 增强路径 | `setVideoEffects(listOf(...))`，GL 外部纹理就地处理，帧不进 JavaScript |
 | 超分实现 | 自写 `BaseGlShaderProgram`，移植 Anime4K / FSR1 的 GLSL（MIT） |
 | 许可证 | Media3 Apache-2.0 + Anime4K MIT + FSR1 MIT，**不产生 GPL 义务** |
-| 包体增量 | 实测 8 个 aar 合计 3.97 MB；当前 release 未开 R8，APK 增量预计 2–3 MB，**无原生 so** |
+| 包体增量 | 8 个 aar 合计 3.97 MB；实测 APK 从 14.75 MB → 17.82 MB（+3.07 MB），**无原生 so** |
 | 旧实现 | `app/src/main/assets/sr/`（WebGL 逐帧管线）**整体删除**，不留兼容开关 |
+
+版本为什么是 1.8.1 而不是最新：
+
+- `minCompileSdk = 35`，与项目 compileSdk 一致；1.11 起要求 36。
+- `setScrubbingModeEnabled` 实测自 1.8 才进入 `ExoPlayer` 接口（1.6.1 / 1.7.1 的 `javap` 输出里没有这个方法），拖动跟手依赖它，不能降版本。
 
 ### 为什么要改掉上一版的 libmpv 结论
 
@@ -354,12 +359,21 @@ onScrubStop
 
 ## 8. 实施拆分
 
-| 阶段 | 交付 | 验收 |
-| --- | --- | --- |
-| **5.1 播放内核** | Media3 PlayerActivity、SurfaceView、图标控制器、真实横屏全屏、`AnalyticsListener` 埋点 | S4（4K60）≥ 58fps、丢帧 < 0.5%；拖动 < 400ms |
-| **5.2 增强框架** | `EnhancementProfile` 抽象、设置三层模型、能力检测、自动降档状态机；先只实现 `Original` + `Sharpen`(RCAS) | 切档无黑帧；RCAS 在 S2 上丢帧 < 0.5% |
-| **5.3 Anime4K 移植** | `Anime4kProgram`、Restore M、Upscale x2 M、资产打包、三项校验 | S1 上输出 2560×1440 且 pass 计数正确；S2 上 Restore 可用 |
-| **5.4 收尾** | 删除 `assets/sr/`、删除 `player.js` 的 WebGL 分支、README 与兼容性说明、真机报告 | 全矩阵通过；无残留引用 |
+| 阶段 | 交付 | 验收 | 状态 |
+| --- | --- | --- | --- |
+| **5.1 播放内核** | Media3 PlayerActivity、SurfaceView、图标控制器、真实横屏全屏、`AnalyticsListener` 埋点 | S4（4K60）≥ 58fps、丢帧 < 0.5%；拖动 < 400ms | **已完成（v0.6.0）**，待真机数据 |
+| **5.2 增强框架** | `EnhancementProfile` 抽象、设置三层模型、能力检测、自动降档状态机；先只实现 `Original` + `Sharpen`(RCAS) | 切档无黑帧；RCAS 在 S2 上丢帧 < 0.5% | 待实施 |
+| **5.3 Anime4K 移植** | `Anime4kProgram`、Restore M、Upscale x2 M、资产打包、三项校验 | S1 上输出 2560×1440 且 pass 计数正确；S2 上 Restore 可用 | 待实施 |
+| **5.4 收尾** | 删除 `assets/sr/`、删除 `player.js` 的 WebGL 分支、README 与兼容性说明、真机报告 | 全矩阵通过；无残留引用 | 待实施 |
+
+5.1 的实际落地情况（v0.6.0，提交 `2645e66`）：
+
+- `PlayerActivity` 走 `Media3 1.8.1` + `SurfaceView`，默认 `setVideoEffects(emptyList())`。
+- `enterScrub()` / `exitScrub()` 实现拖动两级策略：拖动中 `CLOSEST_SYNC` + `setScrubbingModeEnabled(true)`，松手 `EXACT`。scrubbing 只在暂停态启用（官方定位）。
+- 全屏为真实 `SENSOR_LANDSCAPE` + 沉浸式，`configChanges` 覆盖旋转，不重建会话。
+- `AnalyticsListener` 采集解码器名 / 首帧 / 丢帧，落 `weworkshop.log`，「播放信息」菜单可直接查看。
+- `playNative` 只接受 `127.0.0.1` / `file` / `content` 地址。
+- 边下边看暂未切原生：`/stream/` 水位不足返回 503，ExoPlayer 会当硬错误，需要先改阻塞语义或加重试策略。
 
 每个阶段独立构建 APK 真机验证，不合并成一次大改。
 

@@ -19,8 +19,9 @@
       <input id="search" type="search" placeholder="搜索创意工坊" autocomplete="off">
     </div>
     <button id="accelBtn" class="icon-btn" title="网络加速（hosts）">⚡</button>
-    <button id="playerBtn" class="icon-btn" title="本地视频播放与超分">▶</button>
-    <button id="downloadsBtn" class="icon-btn" title="下载列表">⤓</button>
+    <!-- 播放不再是独立入口：视频从「下载 → 已下载」里直接播，
+         本地视频列表收在下载页内，只作为兜底入口（记录被清但文件还在）。 -->
+    <button id="downloadsBtn" class="icon-btn" title="下载与播放">⤓</button>
     <button id="settingsBtn" class="icon-btn" title="设置">⚙</button>
   </div>
   <div class="tabs" id="sortTabs">
@@ -220,7 +221,9 @@
   <div class="modal-backdrop" onclick="closeDownloads()"></div>
   <div class="modal-body settings-body">
     <button class="modal-close" onclick="closeDownloads()">✕</button>
-    <h2 class="settings-title">下载列表</h2>
+    <h2 class="settings-title">下载与播放</h2>
+    <!-- 兜底入口：下载记录被清除、或文件是手动放进目录的，从这里进列表 -->
+    <button id="localVideosBtn" class="btn-ghost local-videos-btn">本地视频</button>
     <div id="downloadItems" class="download-list"></div>
     <div class="detail-actions">
       <button id="cancelAllBtn" class="btn-ghost">全部取消</button>
@@ -238,8 +241,13 @@
 
     <div id="playerList" class="player-list">
       <h2 class="settings-title">本地视频</h2>
+      <div class="sr-guide" id="kernelNote">
+        <b>播放内核</b>：正常播放走原生 ExoPlayer（硬解直出 SurfaceView，4K60 可跑），
+        <b>该路径不支持超分</b>。只有原生启动失败时才会回退到本页的 WebGL 播放器，
+        下面的超分档位仅在这个回退模式下生效。
+      </div>
       <div class="sr-guide">
-        <b>真超分提示</b>：画面会放大到视频源约 <b>1.2×–2×</b> 后渲染，低于 1.2× 时放大链不会生效。
+        <b>回退播放器的超分</b>：画面会放大到视频源约 <b>1.2×–2×</b> 后渲染，低于 1.2× 时放大链不会生效。
         卡顿时会自动逐档降级；按住「A/B」可对比原画。渲染尺寸在创建时锁定，播放中不会改变。
       </div>
       <div id="srGuideOnce" class="sr-guide sr-guide-once hidden">

@@ -898,6 +898,11 @@ function closeDownloads() {
   document.getElementById('downloads').classList.add('hidden');
 }
 document.getElementById('downloadsBtn').onclick = openDownloads;
+// 兜底入口：下载记录被清除、或文件是手动放进目录的，仍能从这里进列表
+document.getElementById('localVideosBtn').onclick = () => {
+  closeDownloads();
+  if (window.__openPlayerList) window.__openPlayerList();
+};
 document.getElementById('cancelAllBtn').onclick = () => {
   window.Bridge.cancelAllDownloads();
   window.Bridge.toast('已取消所有下载');
@@ -912,6 +917,17 @@ document.getElementById('clearDownloadsBtn').onclick = () => {
 function renderDownloads() {
   const box = document.getElementById('downloadItems');
   if (!box) return;
+
+  // 本地实际存在的视频标题。只有命中这里的已完成条目才显示「播放」，
+  // 避免 Application / Asset 这类非视频资源被伪装成可播放。
+  const localTitles = new Set();
+  try {
+    const lv = JSON.parse(window.Bridge.localVideos() || '{}') || {};
+    (lv.items || []).forEach(it => {
+      if (it && !it.streaming && it.title) localTitles.add(it.title);
+    });
+  } catch (e) { /* 枚举失败就当没有本地视频，只是不显示播放按钮 */ }
+
   let arr = [];
   try { arr = JSON.parse(window.Bridge.getDownloads() || '[]'); } catch (e) { arr = []; }
   if (!arr.length) {
@@ -950,7 +966,12 @@ function renderDownloads() {
       + '</div>'
       + '<div class="dl-actions">'
       + (status === 'done'
-        ? '<button class="dl-open" data-open="' + escHtml(d.id) + '">打开文件夹</button>'
+        ? (localTitles.has(d.title || '')
+            ? '<button class="dl-play" data-play="' + escHtml(d.id) + '"'
+              + ' data-title="' + escHtml(d.title || '') + '"'
+              + ' data-img="' + escHtml(d.img || '') + '">播放</button>'
+            : '')
+          + '<button class="dl-open" data-open="' + escHtml(d.id) + '">打开文件夹</button>'
         : (status === 'downloading'
           ? '<button class="dl-cancel" data-cancel="' + escHtml(d.id) + '">取消</button>'
           : '<button class="dl-retry" data-retry="' + escHtml(d.id) + '" data-manifest="' + escHtml(d.manifest || '') + '" data-title="' + escHtml(d.title || '') + '" data-img="' + escHtml(d.img || '') + '">重试</button>'))
@@ -966,6 +987,19 @@ function renderDownloads() {
       if (!id) return;
       closeDownloads();
       openDetail(id, { title: el.dataset.title, img: el.dataset.img }, true);
+    };
+  });
+  box.querySelectorAll('.dl-play').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const ok = window.__playLocal
+        ? window.__playLocal(btn.dataset.title || '', btn.dataset.img || '')
+        : false;
+      if (ok) {
+        closeDownloads();
+      } else {
+        window.Bridge.toast('本地找不到这个文件，可能已被删除或移动');
+      }
     };
   });
   box.querySelectorAll('.dl-open').forEach(btn => {

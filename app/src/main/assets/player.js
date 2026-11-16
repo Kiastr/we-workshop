@@ -70,6 +70,48 @@
     $('player').classList.add('hidden');
   }
 
+  /** 下载页的「本地视频」兜底入口：只为打开列表，不自动播放。 */
+  global.__openPlayerList = function () {
+    openPlayer();
+  };
+
+  /**
+   * 从「下载 → 已下载」直接播一个下载项。
+   *
+   * 不按 id 匹配：LocalVideoServer 的 id 是磁盘文件名，不是工坊 id。
+   * 先按标题精确匹配，再退回封面地址（同一条目的封面 URL 是唯一的）。
+   * 都找不到返回 false，由调用方提示"文件不在本地"。
+   */
+  global.__playLocal = function (title, img) {
+    var data = {};
+    try { data = JSON.parse(global.Bridge.localVideos() || '{}') || {}; } catch (e) { data = {}; }
+    var items = data.items || [];
+    var hit = null, i;
+    for (i = 0; i < items.length; i++) {
+      if (items[i] && !items[i].streaming && title && items[i].title === title) {
+        hit = items[i];
+        break;
+      }
+    }
+    if (!hit && img) {
+      for (i = 0; i < items.length; i++) {
+        if (items[i] && !items[i].streaming && items[i].img === img) {
+          hit = items[i];
+          break;
+        }
+      }
+    }
+    if (!hit) return false;
+
+    // 原生能接管时不要先显示 #player：openNative 内部会 closePlayer，
+    // 先显示再关闭会闪一下
+    if (openNative(hit)) return true;
+    P.open = true;
+    $('player').classList.remove('hidden');
+    playVideo(hit);
+    return true;
+  };
+
   /** 边下边看：从详情页「边看边下」按钮直接进入播放页（跳过列表选择）。
    *  item 由 app.js 用 Bridge.streamingVideo() 的状态组装，含 url/name/title/mime/size。
    *  复用既有 playVideo → initPipeline → WebGL2 超分链路，无需为流式另写一套渲染。 */
@@ -341,7 +383,12 @@
   }
 
   function buildTierOptions() {
-    var list = SRController.availableTiers(P.controller);
+    // AnimeJaNai 是未验证的实验重档（ONNX 权重转写的 10 层卷积，CC-BY-NC-SA），
+    // 从正式档位列表里移出：它位于自动降档顺序末端，几乎必然因尺寸/算力被禁用，
+    // 留在列表里等于用"不可用"充数，与「每个档位都要能真正执行」的要求冲突。
+    var list = SRController.availableTiers(P.controller).filter(function (t) {
+      return t.id !== 'animejanai';
+    });
     $('srTier').innerHTML = list.map(function (t) {
       return '<option value="' + esc(t.id) + '"' + (t.disabled ? ' disabled' : '')
         + ' title="' + esc(t.why || t.hint) + '">' + esc(t.label)
@@ -408,8 +455,7 @@
 
   // ---------------- 控件绑定 ----------------
   function bind() {
-    var pb = $('playerBtn');
-    if (pb) pb.onclick = openPlayer;
+    // 顶栏不再有独立播放入口：列表由下载页的「本地视频」或 __playLocal 打开
     $('playerClose').onclick = closePlayer;
     $('playerBackdrop').onclick = closePlayer;
     $('srBack').onclick = backToList;

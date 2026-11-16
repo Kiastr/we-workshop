@@ -26,7 +26,6 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.Nullable;
-import androidx.annotation.OptIn;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
@@ -66,7 +65,7 @@ import java.util.Locale;
  *   <li>松手切回 EXACT 并精确 seekTo —— 预览快、落地准</li>
  * </ul>
  */
-@OptIn(markerClass = UnstableApi.class)
+@UnstableApi
 public class PlayerActivity extends Activity {
 
     private static final String TAG = "WEPlayer";

@@ -1,8 +1,9 @@
 # 播放器架构决策（ADR-001）
 
-状态：**已定稿**  
+状态：**已定稿**（v0.6.x 实际采用的内核）  
 决策日期：2026-11-16  
-关联：`docs/VIDEO_CLIENT_REDESIGN.md` 第 5、6、7 节，`docs/NATIVE_SUPER_RESOLUTION.md`
+迁移状态：**不进入新仓库**。设计文档已移出本仓库，本文只保留论证与实测记录。  
+关联：`docs/NATIVE_SUPER_RESOLUTION.md`
 
 ---
 
@@ -74,7 +75,7 @@ Animeko 已经在 Media3 的 `BaseGlShaderProgram` 上跑通 Anime4K 的 7 段�
 | B. 阻塞式 HTTP | 水位不足时挂住连接而不是返回 503 | 简单，但每路播放占一个服务线程，且 HTTP 层多一次拷贝 |
 | **C. 自定义 `DataSource`** | `ProgressiveMediaSource` 直接读统一字节缓存层，`read()` 在水位不足时阻塞等待 | 无 HTTP 往返、无重复拷贝，与"播放和下载共用同一份字节"的设计一致 |
 
-C 与 `VIDEO_CLIENT_REDESIGN.md` 第 6 节本来就是同一个要求（统一字节缓存层），只是把消费端从 HTTP 换成 `DataSource`。这是纯 Java 实现，没有原生依赖。
+C 与统一字节缓存层本来就是同一个要求（播放和下载共用一份字节），只是把消费端从 HTTP 换成 `DataSource`。这是纯 Java 实现，没有原生依赖。
 
 拖动到未缓存区间的优先级调度也在这里落地：`DataSource.open(offset)` 把目标区间提升为高优先级，读完恢复。
 
@@ -104,11 +105,11 @@ C 与 `VIDEO_CLIENT_REDESIGN.md` 第 6 节本来就是同一个要求（统一�
 
 ---
 
-## 7. 播放页还差什么（与重构方案第 5 节对齐）
+## 7. 播放页还差什么
 
 当前已落地：返回 / 标题 / 更多 / 中央播放暂停 / 进度条 / 时间 / 全屏 / 单击显隐 / 双击左右 ±10s / 左亮度右音量 / 横向拖动带气泡。
 
-按 `VIDEO_CLIENT_REDESIGN.md` 第 5 节还缺：
+按播放页设计要求还缺：
 
 | 项 | 说明 | 优先级 |
 | --- | --- | --- |

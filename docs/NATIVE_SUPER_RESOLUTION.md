@@ -2,7 +2,8 @@
 
 状态：技术路线已定，待分阶段实施  
 记录日期：2026-11-16  
-关联：`docs/VIDEO_CLIENT_REDESIGN.md` 第 7 节
+迁移状态：**不进入新仓库**。设计文档已移出本仓库，本文只保留实测数据与移植细节。  
+关联：`docs/PLAYER_ARCHITECTURE.md`
 
 ---
 
@@ -398,7 +399,7 @@ onScrubStop
 | 中端机 720p→1440p 跑不满 60 | 超分在中端不可用 | 已按设备分档；不承诺全设备可用，只承诺原画不退化 |
 | `mediacodec` 输出 10bit 时色彩空间未知 | HDR 源偏色 | 源为 HDR 时强制原画并跳过 effect（`Format.colorInfo.colorSpace` 判定） |
 | 中间纹理内存峰值 | 低端机 OOM | 1080p Restore 需 > 4GB RAM 才开放；`onTrimMemory` 释放 |
-| 工坊存在非 faststart MP4 | 首帧慢 | 由缓存层解决（见重构方案第 6 节），与超分解耦 |
+| 工坊存在非 faststart MP4 | 首帧慢 | 由统一字节缓存层解决，与超分解耦 |
 | Anime4K 上游 2024-08 后停更 | shader 无新版本 | 已打包为本地资产，不依赖远端；MIT 允许自由修改 |
 
 ---

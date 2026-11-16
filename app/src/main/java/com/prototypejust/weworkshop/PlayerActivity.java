@@ -14,17 +14,20 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
-import android.widget.ImageView;
 import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
@@ -36,8 +39,6 @@ import androidx.media3.exoplayer.DecoderReuseEvaluation;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.SeekParameters;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
-import androidx.media3.ui.AspectRatioFrameLayout;
-import androidx.media3.ui.PlayerView;
 
 import java.io.File;
 import java.io.FileWriter;
@@ -48,17 +49,19 @@ import java.util.Locale;
  * 原生播放页。
  *
  * <p>为什么单独开一个 Activity，而不是继续用 WebView 里的 &lt;video&gt;：
+ * 旧实现把每一帧从 &lt;video&gt; 拷进 WebGL 画布（texSubImage2D），控制器还固定 30FPS，
+ * 4K60 在这一层就被压成 10 帧左右。原生路径是 MediaCodec → SurfaceView 直出，
+ * 帧数据全程在 GPU 上，不经过 JavaScript、不经过 Bitmap、也不做软件拷贝。
  *
- * <p>旧实现把每一帧从 &lt;video&gt; 拷进 WebGL 画布（texSubImage2D），控制器还固定 30FPS。
- * 4K60 的视频在这一层就被压成 10 帧左右。原生播放器走的是
- * MediaCodec → SurfaceView 的直出路径，帧数据全程在 GPU 上，不经过 JavaScript、
- * 不经过 Bitmap、也不做任何软件拷贝。
+ * <p>依赖面刻意压到最小：只用 media3-exoplayer + SurfaceView。
+ * 不用 media3-ui 的 PlayerView —— 它自带一整套控制器布局和几十个 exo_* 资源，
+ * 而本页控件全是自绘的，那套东西一个都用不上，只会在 inflate 阶段多一份失败可能。
  *
- * <p>画质增强（超分）不在这里实现。本类只保证"原画 4K60 随便拖"这条基线：
- * 默认 setVideoEffects(emptyList())，不创建任何 GL 处理链。超分是后续阶段在
- * 同一个 Player 上按需挂 GlEffect，属于可选增强，不得影响这条基线。
+ * <p>启动过程全部包在 try/catch 里：任何一步抛异常（含 NoClassDefFoundError 这类 Error），
+ * 都记录堆栈、提示原因、立刻结束页面，由 player.js 回退到旧的兼容播放器。
+ * 宁可降级到 10 帧，也不能让用户看到闪退。
  *
- * <p>拖动跟手靠三件事（对应 docs/NATIVE_SUPER_RESOLUTION.md 6.4）：
+ * <p>拖动跟手靠三件事：
  * <ul>
  *   <li>拖动中 SeekParameters.CLOSEST_SYNC —— 只解关键帧</li>
  *   <li>拖动中 setScrubbingModeEnabled(true) —— 解码器超实时运行并丢非参考帧</li>
@@ -76,6 +79,12 @@ public class PlayerActivity extends Activity {
     public static final String EXTRA_WIDTH = "video_width";
     public static final String EXTRA_HEIGHT = "video_height";
 
+    /**
+     * 最近一次启动失败的原因，供 player.js 读取后决定是否回退到兼容播放器。
+     * 读一次即清空，避免影响下一次播放。
+     */
+    public static volatile String STARTUP_ERROR;
+
     /** 控制层自动隐藏延时。 */
     private static final long HIDE_DELAY_MS = 3200L;
     /** 进度刷新间隔。 */
@@ -84,7 +93,9 @@ public class PlayerActivity extends Activity {
     private static final long DOUBLE_TAP_SEEK_MS = 10_000L;
 
     private ExoPlayer player;
-    private PlayerView playerView;
+    private SurfaceView surfaceView;
+    private Surface videoSurface;
+    private AspectFrameLayout videoFrame;
     private FrameLayout root;
     private View controls;
     private ImageButton btnPlay;
@@ -95,7 +106,6 @@ public class PlayerActivity extends Activity {
     private TextView titleView;
     private TextView seekBubble;
     private ProgressBar loading;
-    private ImageView posterView;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private GestureDetector gestures;
@@ -133,6 +143,15 @@ public class PlayerActivity extends Activity {
     private String inputSummary = "";
     private boolean statsLogged;
 
+    /** 切后台前是否正在播放。用户主动暂停时为 false，回前台不会自动开播。 */
+    private boolean resumeOnForeground = true;
+    /** 横向拖动的目标偏移量，ACTION_UP 时用它落地。 */
+    private long seekDeltaMs;
+    /** 手势 seek 节流：scrubbing 下每次 seekTo 都要重排队列，不能每个 MOVE 都发。 */
+    private long lastGestureSeekAt;
+    /** 上一次实际写入系统的音量档位，避免重复调用。 */
+    private int lastAppliedVolume = -1;
+
     // =====================================================================
     // 入口
     // =====================================================================
@@ -151,10 +170,17 @@ public class PlayerActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        try {
+            initPage();
+        } catch (Throwable t) {
+            failStartup(t);
+        }
+    }
 
+    private void initPage() {
         String url = getIntent().getStringExtra(EXTRA_URL);
         if (url == null || url.isEmpty()) {
-            Toast.makeText(this, "没有可播放的地址", Toast.LENGTH_SHORT).show();
+            toast("没有可播放的地址");
             finish();
             return;
         }
@@ -164,16 +190,19 @@ public class PlayerActivity extends Activity {
         applyImmersive();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        titleView.setText(getIntent().getStringExtra(EXTRA_TITLE));
+        String title = getIntent().getStringExtra(EXTRA_TITLE);
+        titleView.setText(title == null ? "" : title);
 
         // 前端能提供宽高时先定方向，避免起播后再转一次
         int w = getIntent().getIntExtra(EXTRA_WIDTH, 0);
         int h = getIntent().getIntExtra(EXTRA_HEIGHT, 0);
         if (w > 0 && h > 0) {
             portraitVideo = h > w;
+            videoFrame.setAspectRatio((float) w / (float) h);
             applyOrientation();
         }
 
+        bindSurface();
         buildPlayer(url);
         setupControls();
         setupGestures();
@@ -184,10 +213,35 @@ public class PlayerActivity extends Activity {
         showGestureTipOnce();
     }
 
+    /**
+     * 启动失败：记录堆栈、把原因交给前端、结束本页。
+     *
+     * <p>不在这里弹错误页，是因为用户要的是"能看"，而不是"看报错"。
+     * 立刻 finish 之后 WebView 会重新拿到焦点，player.js 检测到 {@link #STARTUP_ERROR}
+     * 就自动切回旧的兼容播放器，并在列表页提示一句原因。
+     */
+    private void failStartup(Throwable t) {
+        String trace = Log.getStackTraceString(t);
+        Log.e(TAG, "player startup failed", t);
+        CrashLog.write(this, Thread.currentThread(), t);
+        appendLog("startup failed:\n" + trace);
+        STARTUP_ERROR = t.getClass().getSimpleName()
+                + (t.getMessage() == null ? "" : ": " + t.getMessage());
+        try {
+            if (player != null) {
+                player.release();
+                player = null;
+            }
+        } catch (Throwable ignored) {
+            // 已经处于失败路径，释放失败不再处理
+        }
+        toast("原生播放器启动失败，已切回兼容模式");
+        finish();
+    }
+
     /** 首次进入播放器时的手势提示，只显示一次。 */
     private void showGestureTipOnce() {
-        android.content.SharedPreferences sp =
-                getSharedPreferences("weworkshop", MODE_PRIVATE);
+        android.content.SharedPreferences sp = getSharedPreferences("weworkshop", MODE_PRIVATE);
         if (sp.getBoolean("player_tip_shown", false)) return;
         sp.edit().putBoolean("player_tip_shown", true).apply();
         ui.postDelayed(() -> Toast.makeText(this,
@@ -197,7 +251,8 @@ public class PlayerActivity extends Activity {
 
     private void bindViews() {
         root = findViewById(R.id.playerRoot);
-        playerView = findViewById(R.id.playerView);
+        videoFrame = findViewById(R.id.videoFrame);
+        surfaceView = findViewById(R.id.videoSurface);
         controls = findViewById(R.id.controls);
         btnPlay = findViewById(R.id.btnPlay);
         btnFullscreen = findViewById(R.id.btnFullscreen);
@@ -207,7 +262,6 @@ public class PlayerActivity extends Activity {
         titleView = findViewById(R.id.titleView);
         seekBubble = findViewById(R.id.seekBubble);
         loading = findViewById(R.id.loading);
-        posterView = findViewById(R.id.posterView);
 
         View btnBack = findViewById(R.id.btnBack);
         btnBack.setOnClickListener(v -> finish());
@@ -218,20 +272,64 @@ public class PlayerActivity extends Activity {
         touchSlop = (int) (12 * getResources().getDisplayMetrics().density);
     }
 
+    /**
+     * 接管 Surface 生命周期。
+     *
+     * <p>显式走 SurfaceHolder 回调，而不是 setVideoSurfaceView：SurfaceView 的 Surface
+     * 在页面销毁/旋转时会重建，直接持有旧 Surface 会让画面停在最后一帧。
+     * 回调里只在 Surface 有效时把它交给播放器，销毁时立刻清掉。
+     */
+    private void bindSurface() {
+        surfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                videoSurface = holder.getSurface();
+                attachSurface();
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                videoSurface = holder.getSurface();
+                attachSurface();
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {
+                videoSurface = null;
+                if (player != null) {
+                    try {
+                        player.clearVideoSurface();
+                    } catch (Throwable ignored) {
+                        // 页面正在销毁，清不清都随进程回收
+                    }
+                }
+            }
+        });
+    }
+
+    private void attachSurface() {
+        if (player == null || videoSurface == null || !videoSurface.isValid()) return;
+        try {
+            player.setVideoSurface(videoSurface);
+        } catch (Throwable t) {
+            Log.w(TAG, "setVideoSurface failed", t);
+        }
+    }
+
     // =====================================================================
     // 播放器
     // =====================================================================
 
     private void buildPlayer(String url) {
         player = new ExoPlayer.Builder(this).build();
-        playerView.setPlayer(player);
 
-        // 基线：不挂任何视频效果。空 list 就是关闭，解码器直接绑到 SurfaceView 的 Surface。
-        player.setVideoEffects(java.util.Collections.emptyList());
+        // 基线：不挂任何视频效果。不加 effect 时解码器直接绑到 Surface，
+        // 帧不过 GL 链；超分是后续在同一个 player 上按需挂的独立阶段。
+        attachSurface();
 
         // 音频焦点交给系统：来电/其他 App 播放时自动暂停
         player.setAudioAttributes(
-                new androidx.media3.common.AudioAttributes.Builder()
+                new AudioAttributes.Builder()
                         .setUsage(C.USAGE_MEDIA)
                         .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
                         .build(),
@@ -241,9 +339,6 @@ public class PlayerActivity extends Activity {
             @Override
             public void onPlaybackStateChanged(int state) {
                 loading.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
-                if (state == Player.STATE_READY) {
-                    posterView.setVisibility(View.GONE);
-                }
                 updatePlayPauseIcon();
             }
 
@@ -256,6 +351,10 @@ public class PlayerActivity extends Activity {
             public void onVideoSizeChanged(VideoSize size) {
                 videoWidth = size.width;
                 videoHeight = size.height;
+                if (videoWidth > 0 && videoHeight > 0) {
+                    float ratio = (float) videoWidth * size.pixelWidthHeightRatio / (float) videoHeight;
+                    videoFrame.setAspectRatio(ratio);
+                }
                 if (!orientationLocked && videoWidth > 0 && videoHeight > 0) {
                     boolean portrait = videoHeight > videoWidth;
                     if (portrait != portraitVideo) {
@@ -271,7 +370,7 @@ public class PlayerActivity extends Activity {
                 String msg = describeError(error);
                 Log.e(TAG, "playback error: " + msg, error);
                 appendLog("error: " + msg);
-                Toast.makeText(PlayerActivity.this, msg, Toast.LENGTH_LONG).show();
+                toast(msg);
             }
         });
 
@@ -299,7 +398,6 @@ public class PlayerActivity extends Activity {
                 if (firstFrameReported) return;
                 firstFrameReported = true;
                 firstFrameMs = System.currentTimeMillis() - playStartWallMs;
-                posterView.setVisibility(View.GONE);
                 loading.setVisibility(View.GONE);
                 appendLog("firstFrame=" + firstFrameMs + "ms");
             }
@@ -419,6 +517,7 @@ public class PlayerActivity extends Activity {
      * </ul>
      */
     private void enterScrub() {
+        if (player == null) return;
         wasPlayingBeforeSeek = player.isPlaying();
         if (wasPlayingBeforeSeek) player.pause();
         player.setScrubbingModeEnabled(true);
@@ -427,6 +526,7 @@ public class PlayerActivity extends Activity {
 
     /** 结束拖动：关 scrubbing、切回精确 seek、落到目标帧，并按拖动前的状态恢复播放。 */
     private void exitScrub(long targetMs) {
+        if (player == null) return;
         player.setScrubbingModeEnabled(false);
         player.setSeekParameters(SeekParameters.EXACT);
         player.seekTo(targetMs);
@@ -446,27 +546,28 @@ public class PlayerActivity extends Activity {
     private void showMoreMenu(View anchor) {
         PopupMenu menu = new PopupMenu(this, anchor);
         menu.getMenu().add(0, 1, 0, "适应画面");
-        menu.getMenu().add(0, 2, 1, "铺满画面");
-        menu.getMenu().add(0, 3, 2, "原始尺寸");
+        menu.getMenu().add(0, 2, 1, "铺满（裁切）");
+        menu.getMenu().add(0, 3, 2, "拉伸铺满");
         menu.getMenu().add(0, 4, 3, "锁定 / 解锁旋转");
         menu.getMenu().add(0, 5, 4, "播放信息");
         menu.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
                 case 1:
-                    playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
+                    videoFrame.setResizeMode(AspectFrameLayout.MODE_FIT);
                     return true;
                 case 2:
-                    playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
+                    videoFrame.setResizeMode(AspectFrameLayout.MODE_ZOOM);
                     return true;
                 case 3:
-                    playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH);
+                    videoFrame.setResizeMode(AspectFrameLayout.MODE_FILL);
                     return true;
                 case 4:
                     toggleOrientationLock();
                     return true;
                 case 5:
-                    Toast.makeText(this, buildStatsText(), Toast.LENGTH_LONG).show();
-                    appendLog(buildStatsText());
+                    String stats = buildStatsText();
+                    toast(stats);
+                    appendLog(stats);
                     return true;
                 default:
                     return false;
@@ -503,6 +604,7 @@ public class PlayerActivity extends Activity {
     }
 
     private void seekBy(long deltaMs) {
+        if (player == null) return;
         long duration = Math.max(0, player.getDuration());
         long target = Math.max(0, Math.min(duration, player.getCurrentPosition() + deltaMs));
         player.seekTo(target);
@@ -518,6 +620,7 @@ public class PlayerActivity extends Activity {
 
     @Override
     public boolean onTouchEvent(MotionEvent ev) {
+        if (gestures == null) return super.onTouchEvent(ev);
         gestures.onTouchEvent(ev);
 
         switch (ev.getActionMasked()) {
@@ -559,7 +662,7 @@ public class PlayerActivity extends Activity {
 
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
-                if (dragMode == DRAG_SEEK) {
+                if (dragMode == DRAG_SEEK && player != null) {
                     long duration = Math.max(1, player.getDuration());
                     long target = Math.max(0, Math.min(duration, downPositionMs + seekDeltaMs));
                     exitScrub(target);
@@ -575,12 +678,8 @@ public class PlayerActivity extends Activity {
         return true;
     }
 
-    /** 横向拖动的目标偏移量，ACTION_UP 时用它落地。 */
-    private long seekDeltaMs;
-    /** 手势 seek 节流：scrubbing 下每次 seekTo 都要重排队列，不能每个 MOVE 都发。 */
-    private long lastGestureSeekAt;
-
     private void applyGestureSeek(float dx) {
+        if (player == null) return;
         long duration = Math.max(1, player.getDuration());
         // 整屏宽度对应 ±90 秒，手感接近主流播放器
         long span = Math.min(duration, 180_000L);
@@ -624,15 +723,16 @@ public class PlayerActivity extends Activity {
         // 只有真的变了才调系统接口，否则每个 MOVE 都触发一次音量 UI 与音效反馈
         if (target != lastAppliedVolume) {
             lastAppliedVolume = target;
-            am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0);
+            try {
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0);
+            } catch (Throwable ignored) {
+                // 勿扰模式等场景下系统可能拒绝改音量，不影响继续拖动
+            }
         }
         int percent = max == 0 ? 0 : Math.round(target * 100f / max);
         seekBubble.setText(percent + "%");
         seekBubble.setVisibility(View.VISIBLE);
     }
-
-    /** 上一次实际写入系统的音量档位，避免重复调用。 */
-    private int lastAppliedVolume = -1;
 
     private int currentVolume() {
         AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -661,27 +761,32 @@ public class PlayerActivity extends Activity {
     }
 
     private void applyOrientation() {
-        if (portraitVideo) {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
-        } else {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        try {
+            if (portraitVideo) {
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+            } else {
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+            }
+        } catch (Throwable t) {
+            // 个别 ROM 在窗口属性不满足条件时会拒绝改方向，保持当前方向即可
+            Log.w(TAG, "setRequestedOrientation failed", t);
         }
         updateFullscreenIcon();
     }
 
     private void toggleOrientationLock() {
         orientationLocked = !orientationLocked;
-        if (orientationLocked) {
-            int current = getResources().getConfiguration().orientation;
-            setRequestedOrientation(current == Configuration.ORIENTATION_LANDSCAPE
-                    ? ActivityInfo.SCREEN_ORIENTATION_LOCKED
-                    : ActivityInfo.SCREEN_ORIENTATION_LOCKED);
-        } else {
-            applyOrientation();
+        try {
+            if (orientationLocked) {
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LOCKED);
+            } else {
+                applyOrientation();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "toggle orientation failed", t);
         }
         updateFullscreenIcon();
-        Toast.makeText(this, orientationLocked ? "方向已锁定" : "方向已解锁",
-                Toast.LENGTH_SHORT).show();
+        toast(orientationLocked ? "方向已锁定" : "方向已解锁");
     }
 
     private void updateFullscreenIcon() {
@@ -748,9 +853,6 @@ public class PlayerActivity extends Activity {
         }
     }
 
-    /** 切后台前是否正在播放。用户主动暂停时为 false，回前台不会自动开播。 */
-    private boolean resumeOnForeground = true;
-
     @Override
     protected void onStop() {
         super.onStop();
@@ -764,8 +866,11 @@ public class PlayerActivity extends Activity {
         super.onDestroy();
         ui.removeCallbacksAndMessages(null);
         if (player != null) {
-            playerView.setPlayer(null);
-            player.release();
+            try {
+                player.release();
+            } catch (Throwable t) {
+                Log.w(TAG, "release failed", t);
+            }
             player = null;
         }
     }
@@ -806,6 +911,11 @@ public class PlayerActivity extends Activity {
         } catch (IOException ignored) {
             // 日志写不进去不影响播放
         }
+    }
+
+    private void toast(String msg) {
+        if (isFinishing()) return;
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
     }
 
     private String describeError(PlaybackException e) {

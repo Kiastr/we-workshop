@@ -399,11 +399,53 @@ public class Bridge {
             }
             int w = parseIntOrZero(width);
             int h = parseIntOrZero(height);
-            activity.startActivity(
-                    PlayerActivity.buildIntent(activity, url, title, id, w, h));
+            final Intent intent = PlayerActivity.buildIntent(activity, url, title, id, w, h);
+            // 必须回主线程启动：@JavascriptInterface 方法跑在 WebView 的 JavaBridge 线程，
+            // 从非主线程 startActivity 在部分 ROM 上会被后台启动限制拦掉或行为异常。
+            main.post(() -> {
+                if (activity.isFinishing() || activity.isDestroyed()) return;
+                try {
+                    activity.startActivity(intent);
+                } catch (Throwable t) {
+                    Log.e("Bridge", "startActivity failed", t);
+                    toast("无法打开播放器");
+                }
+            });
         } catch (Exception e) {
             Log.e("Bridge", "playNative failed", e);
             toast("无法打开播放器");
+        }
+    }
+
+    /**
+     * 原生播放器启动失败的原因；读一次即清空。空串表示上一次播放没有启动失败。
+     *
+     * <p>player.js 在回到前台时读它：非空就说明原生播放页刚启动就挂了，
+     * 前端据此自动切回旧的兼容播放器，用户至少还能看。
+     */
+    @JavascriptInterface
+    public String nativePlayerError() {
+        String err = PlayerActivity.STARTUP_ERROR;
+        PlayerActivity.STARTUP_ERROR = null;
+        return err == null ? "" : err;
+    }
+
+    /** 上次未捕获异常的堆栈（crash.log 尾部）。没有则返回空串。 */
+    @JavascriptInterface
+    public String crashReport() {
+        try {
+            return CrashLog.read(activity);
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    @JavascriptInterface
+    public void clearCrashReport() {
+        try {
+            CrashLog.clear(activity);
+        } catch (Throwable ignored) {
+            // 清不掉也无所谓，下次启动还会再写
         }
     }
 

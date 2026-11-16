@@ -72,6 +72,18 @@ object SteamService {
 
     @Volatile var isLoggedIn = false
         private set
+
+    /**
+     * 正在用本地 refreshToken 自动恢复会话。
+     *
+     * <p>为什么要单独暴露：恢复要连 CM 服务器，正常也要几秒，慢的时候十几秒。
+     * 这段时间 isLoggedIn 还是 false，前端若只看 loggedIn 就会把「账号密码表单」
+     * 亮出来，用户以为掉登录了，还没等恢复完就重新输一遍。
+     */
+    @Volatile var restoring = false
+        private set
+    @Volatile var hasSavedToken = false
+        private set
     @Volatile var accountName = ""
         private set
     @Volatile var steamId64 = 0L
@@ -141,19 +153,28 @@ object SteamService {
         val token = sp.getString("refresh_token", "").orEmpty()
         val account = sp.getString("account_name", "").orEmpty()
         refreshToken = token
-        if (token.isNotBlank() && account.isNotBlank()) {
+        hasSavedToken = token.isNotBlank() && account.isNotBlank()
+        if (hasSavedToken) {
             accountName = account
+            restoring = true
             status = "正在恢复 Steam 会话…"
+            notifyState()
             restoreJob = scope.launch {
                 try {
-                    restoreSession(account, token)
+                    restoreWithRetry(account, token)
                 } catch (e: java.util.concurrent.CancellationException) {
                     // 用户手动登录时会把恢复流程取消，这时别去覆盖登录流程正在显示的状态。
                     Log.i(TAG, "restore session cancelled")
                 } catch (t: Throwable) {
                     Log.w(TAG, "restore session failed", t)
+                    fileLog("restore failed: ${describeChain(t)}")
                     isLoggedIn = false
-                    status = "未登录"
+                    // 说清楚是「自动恢复」失败而不是「没登录」，否则用户以为账号掉了。
+                    // 令牌仍然保留：网络恢复后重开应用还能再试，不会因为一次抖动就要求重输密码。
+                    status = "自动恢复登录失败（${friendlyError(t)}），可点下方按钮手动登录"
+                    notifyState()
+                } finally {
+                    restoring = false
                     notifyState()
                 }
             }
@@ -259,12 +280,17 @@ object SteamService {
                 val account = poll.accountName?.takeIf { it.isNotBlank() } ?: username.trim()
                 if (token.isBlank()) throw IllegalStateException("Steam 未返回登录令牌")
 
+                // 先落盘再连 CM。logOnWithToken 失败（限流、连接抖动、换 IP）时令牌仍在，
+                // 下次启动能自动恢复；反过来先登录后落盘，一旦那一步失败就等于白认了一次证，
+                // 用户下次还得重新输账号密码。
+                accountName = account
+                refreshToken = token
+                hasSavedToken = true
+                prefs?.edit()?.putString("refresh_token", token)?.putString("account_name", account)?.apply()
+
                 status = "正在登录 Steam…"
                 notifyState()
                 logOnWithToken(account, token)
-                accountName = account
-                refreshToken = token
-                prefs?.edit()?.putString("refresh_token", token)?.putString("account_name", account)?.apply()
                 isLoggedIn = true
                 // 登录成功就撤掉「等待确认」的界面状态，别把 guard 标记留给下一次。
                 guardNeeded = false
@@ -388,6 +414,42 @@ object SteamService {
         return cur
     }
 
+    /**
+     * 自动恢复会话，失败重试。
+     *
+     * <p>原来只试一次，一次失败就把界面打回「未登录」。实际最常见的失败根本不是令牌失效，
+     * 而是冷启动那几秒 CM 还没连稳（家里网络 + 加速 DNS 预热），重试一两次就过了。
+     * 真的失效（Expired / Revoked / InvalidPassword）才立刻放弃，别让用户白等。
+     */
+    private suspend fun restoreWithRetry(account: String, token: String) {
+        var last: Throwable? = null
+        for (attempt in 1..3) {
+            try {
+                if (attempt > 1) {
+                    status = "正在恢复 Steam 会话…（第 $attempt 次）"
+                    notifyState()
+                    runCatching { client?.disconnect() }
+                    delay(1_500L * (attempt - 1))
+                }
+                restoreSession(account, token)
+                return
+            } catch (e: java.util.concurrent.CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                last = t
+                fileLog("restore attempt $attempt failed: ${describeChain(t)}")
+                if (isTerminalAuthError(t)) throw t
+            }
+        }
+        throw last ?: IllegalStateException("恢复会话失败")
+    }
+
+    /** 这些结果重试也没用：令牌已经作废或账号被拒，只能重新登录。 */
+    private fun isTerminalAuthError(t: Throwable): Boolean {
+        val root = rootCause(t)
+        return root is AuthenticationException && isTerminalPollResult(root.result)
+    }
+
     private suspend fun restoreSession(account: String, token: String) {
         withContext(Dispatchers.IO) {
             ensureClient()
@@ -396,6 +458,7 @@ object SteamService {
             notifyState()
             logOnWithToken(account, token)
             isLoggedIn = true
+            hasSavedToken = true
             status = "已登录：$account"
             notifyState()
             Log.i(TAG, "session restored: $account")
@@ -487,6 +550,8 @@ object SteamService {
             steamId64 = 0L
             accountName = ""
             refreshToken = ""
+            hasSavedToken = false
+            restoring = false
             reconnectJob?.cancel()
             // 主动登出说明用户可能要换账号：清干净令牌与登录中间态，别让上一次的 forceCode 串到下一次。
             guardNeeded = false
@@ -506,6 +571,8 @@ object SteamService {
     fun stateJson(): String = buildString {
         append('{')
         append("\"loggedIn\":").append(isLoggedIn).append(',')
+        append("\"restoring\":").append(restoring).append(',')
+        append("\"hasToken\":").append(hasSavedToken).append(',')
         append("\"busy\":").append(busy).append(',')
         append("\"guard\":").append(guardNeeded).append(',')
         append("\"guardType\":\"").append(guardType.replace("\"", "")).append("\",")

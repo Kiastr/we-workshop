@@ -803,7 +803,11 @@ function renderSteam() {
   if (!st) return;
   st.textContent = steam.status || (steam.loggedIn ? '已登录：' + steam.account : '未登录');
   st.classList.toggle('err', !!steam.error);
-  document.getElementById('steamLoggedOut').classList.toggle('hidden', !!steam.loggedIn);
+  // 恢复会话期间不要亮出账号密码表单：恢复要连 CM 服务器，几秒到十几秒都有可能。
+  // 表单先弹出来会让用户以为掉登录了，还没等恢复完就重新输一遍——这正是「每次杀后台
+  // 都要重新登录」的直接原因，不是令牌没了。
+  const restoring = !!steam.restoring && !steam.loggedIn;
+  document.getElementById('steamLoggedOut').classList.toggle('hidden', !!steam.loggedIn || restoring);
   document.getElementById('steamLoggedIn').classList.toggle('hidden', !steam.loggedIn);
   const guardBox = document.getElementById('steamGuardBox');
   guardBox.classList.toggle('hidden', !steam.guard || !!steam.loggedIn);
@@ -1073,3 +1077,51 @@ setInterval(function () {
 restoreFilters();
 applyFilterUI();
 loadPage();
+
+/* ---------------- 崩溃回显 ---------------- */
+
+/**
+ * 上次运行如果有未捕获异常，这里把它显示成一条横幅。
+ *
+ * <p>为什么要有：播放页这类原生页面出问题时，用户能提供的往往只有「闪退」两个字。
+ * 崩溃堆栈已经由 WeApplication 写进应用私有目录，这里读出来直接展示，
+ * 用户截图就能定位，不必连电脑抓 logcat。
+ */
+function showCrashBanner() {
+  var b = window.Bridge;
+  if (!b || typeof b.crashReport !== 'function') return;
+  var text = '';
+  try { text = b.crashReport() || ''; } catch (e) { return; }
+  if (!String(text).trim()) return;
+  if (document.getElementById('crashBanner')) return;
+
+  var box = document.createElement('div');
+  box.id = 'crashBanner';
+  box.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:9999;background:#2a1410;'
+    + 'color:#ffd9cf;font-size:12px;line-height:1.5;padding:10px 12px;'
+    + 'padding-top:calc(10px + var(--safe-top, 0px));max-height:46vh;overflow:auto;'
+    + 'border-bottom:1px solid #6b2a1c;';
+
+  var head = document.createElement('div');
+  head.textContent = '上次运行出现异常（可长按复制下面的内容）';
+  head.style.cssText = 'font-weight:600;margin-bottom:6px;color:#ff9d7a;';
+  box.appendChild(head);
+
+  var pre = document.createElement('pre');
+  pre.textContent = text;
+  pre.style.cssText = 'margin:0;white-space:pre-wrap;word-break:break-all;font-size:11px;';
+  box.appendChild(pre);
+
+  var close = document.createElement('button');
+  close.textContent = '关闭并清除';
+  close.style.cssText = 'margin-top:8px;background:#6b2a1c;color:#fff;border:0;'
+    + 'border-radius:6px;padding:6px 12px;font-size:12px;';
+  close.onclick = function () {
+    try { b.clearCrashReport(); } catch (e) { /* ignore */ }
+    box.remove();
+  };
+  box.appendChild(close);
+  document.body.appendChild(box);
+}
+
+setTimeout(showCrashBanner, 900);

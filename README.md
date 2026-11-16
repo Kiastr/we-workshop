@@ -44,12 +44,16 @@ Wallpaper Engine 没有手机端，创意工坊也只能在 PC 客户端里看�
 
 | 项 | 实现 |
 | --- | --- |
-| 内核 | Media3 ExoPlayer 1.8.1 |
+| 内核 | Media3 ExoPlayer 1.8.1（只用 `media3-exoplayer`，不引 `media3-ui`） |
 | 输出 | `SurfaceView` + 解码器直出，帧数据全程在 GPU，不经过 JavaScript / Bitmap / `texSubImage2D` |
-| 视频效果 | 默认 `setVideoEffects(emptyList())`，**不创建 GL 处理链**，原画零额外开销 |
+| 画面比例 | 自写 `AspectFrameLayout` 按视频宽高比居中，支持适应 / 铺满裁切 / 拉伸三种模式 |
+| 视频效果 | 默认不挂任何 effect，**不创建 GL 处理链**，原画零额外开销 |
 | 拖动 | 拖动中 `SeekParameters.CLOSEST_SYNC` + `setScrubbingModeEnabled(true)`（只解关键帧、解码器超实时运行），松手切回 `EXACT` 精确落点 |
 | 全屏 | 真实 `SENSOR_LANDSCAPE` + 沉浸式隐藏状态栏/导航栏，旋转不重建播放会话 |
 | 控件 | 全部 Material 图标按钮，无文字按钮；单击显隐，双击左右 ±10s，左滑亮度、右滑音量 |
+| 失败兜底 | 启动过程任何一步抛异常（含 `Error`）都写入崩溃日志并自动切回旧的 WebGL 播放器，**不闪退** |
+
+播放页刻意**不用 media3-ui 的 `PlayerView`**：它自带一整套控制器布局和几十个 `exo_*` 资源，而本页控件全是自绘的，那套东西一个都用不上。只用 `SurfaceView` + `media3-exoplayer`，inflate 面小、包体也小。
 
 播放器会把实测数据写进日志（`Android/data/com.prototypejust.weworkshop/files/weworkshop.log`）：
 
@@ -61,6 +65,14 @@ Wallpaper Engine 没有手机端，创意工坊也只能在 PC 客户端里看�
 ```
 
 「播放信息」菜单项可随时查看同一组数据。**丢帧 > 0.5% 就说明这台设备这一档没跑住**，不要凭手感判断。
+
+### 崩溃日志
+
+未捕获异常由 `WeApplication` → `CrashLog` 写进应用私有目录的 `crash.log`（设备型号 + Android 版本 + 完整堆栈）。
+下次启动时 WebView 会把它显示成一条覆盖横幅，**长按可复制**，点「关闭并清除」才会删掉。
+
+播放页自己的启动失败也会走同一条记录路径，另外还有一份简版原因会经由 `Bridge.nativePlayerError()`
+交给 `player.js`，用于判定是否回退到兼容播放器。
 
 超分尚未迁到原生内核。下面的 WebGL 链路是 0.5.x 的旧实现，仅作为迁移参考保留；新方案见 `docs/NATIVE_SUPER_RESOLUTION.md`（Media3 `GlEffect` + Anime4K/FSR1，原画基线不受影响）。
 
@@ -197,6 +209,20 @@ SteamClient.onClientDisconnected()
 
 排查用的日志在 `Android/data/com.prototypejust.weworkshop/files/weworkshop.log`，登录失败会记录完整的异常链和 `allowedConfirmations` 列表；断线重试会写 `poll: client disconnected, reconnecting` / `poll retry:`。
 
+### 杀后台后要重新输账号密码（0.6.1）
+
+`refreshToken` 一直是持久化的，问题出在「恢复中」这段状态没告诉前端：冷启动要连 CM 服务器，正常几秒、慢的时候十几秒，这段时间 `loggedIn` 仍是 `false`，前端就把账号密码表单亮了出来——看上去像掉登录，其实恢复还在跑，用户还没等完就重新输了一遍。
+
+0.6.1 的改动：
+
+| 改动 | 原因 |
+| --- | --- |
+| 新增 `restoring` 状态并上报前端 | 恢复期间只显示「正在恢复 Steam 会话…」，不显示账号密码表单 |
+| 恢复失败重试 3 次（1.5s / 3s 退避） | 冷启动那几秒 CM 常常还没连稳，一次失败不等于令牌失效 |
+| 令牌先落盘、再连 CM | `logOnWithToken` 失败时令牌仍在，下次启动还能自动恢复 |
+| 只有 `Expired` / `Revoked` / `AccessDenied` 等终态错误才立刻放弃 | 其余错误重试有意义，别让用户白等 |
+| 恢复失败保留令牌 | 不再因为一次网络抖动就要求重新输密码 |
+
 ## 网络加速（App 内 hosts）
 
 顶栏 **⚡** 打开。参考 Watt Toolkit 的「域名 → 优选 IP」思路，但按 Android 的实际约束重新落地。
@@ -323,7 +349,7 @@ sdk.dir=/path/to/android-sdk
 
 > 仓库里的 Gradle Wrapper 指向腾讯云镜像（`mirrors.cloud.tencent.com`），国内网络可直接拉取 Gradle 发行版；如需官方地址，改 `gradle/wrapper/gradle-wrapper.properties` 里的 `distributionUrl` 即可。
 
-主要依赖：`in.dragonbra:javasteam`（Steam 协议）、OkHttp、protobuf-java、BouncyCastle、zstd-jni、xz、lz4。播放与超分**不新增任何第三方依赖**，纯 WebView + WebGL2 + Java 标准库。
+主要依赖：`in.dragonbra:javasteam`（Steam 协议）、OkHttp、protobuf-java、BouncyCastle、zstd-jni、xz、lz4，以及原画播放内核 `androidx.media3:media3-exoplayer`。旧 WebGL 超分链路**不新增任何第三方依赖**，纯 WebView + WebGL2 + Java 标准库。
 
 ### GitHub Actions 自动出包
 

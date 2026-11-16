@@ -366,13 +366,21 @@ onScrubStop
 | **5.3 Anime4K 移植** | `Anime4kProgram`、Restore M、Upscale x2 M、资产打包、三项校验 | S1 上输出 2560×1440 且 pass 计数正确；S2 上 Restore 可用 | 待实施 |
 | **5.4 收尾** | 删除 `assets/sr/`、删除 `player.js` 的 WebGL 分支、README 与兼容性说明、真机报告 | 全矩阵通过；无残留引用 | 待实施 |
 
-5.1 的实际落地情况（v0.6.0，提交 `2645e66`）：
+5.1 的实际落地情况（v0.6.0 起，v0.6.1 修订）：
 
-- `PlayerActivity` 走 `Media3 1.8.1` + `SurfaceView`，默认 `setVideoEffects(emptyList())`。
+- `PlayerActivity` 走 `Media3 1.8.1` + `SurfaceView`，默认不挂任何 effect。
+- **不引 `media3-ui`**：画面容器是自写的 `AspectFrameLayout`（适应 / 铺满裁切 / 拉伸），
+  控制器全部自绘。`PlayerView` 自带的那套控制器与 `exo_*` 资源本项目一个都用不上，
+  留着只会多一份 inflate 失败面，v0.6.1 已连同依赖一起删除。
+- Surface 走 `SurfaceHolder.Callback` 显式接管：`surfaceCreated/Changed` 里把有效 Surface
+  交给播放器，`surfaceDestroyed` 里 `clearVideoSurface()`，避免旋转或切后台后画面停在最后一帧。
 - `enterScrub()` / `exitScrub()` 实现拖动两级策略：拖动中 `CLOSEST_SYNC` + `setScrubbingModeEnabled(true)`，松手 `EXACT`。scrubbing 只在暂停态启用（官方定位）。
 - 全屏为真实 `SENSOR_LANDSCAPE` + 沉浸式，`configChanges` 覆盖旋转，不重建会话。
 - `AnalyticsListener` 采集解码器名 / 首帧 / 丢帧，落 `weworkshop.log`，「播放信息」菜单可直接查看。
-- `playNative` 只接受 `127.0.0.1` / `file` / `content` 地址。
+- `playNative` 只接受 `127.0.0.1` / `file` / `content` 地址，并在主线程 `startActivity`
+  （`@JavascriptInterface` 跑在 JavaBridge 线程，非主线程启动 Activity 在部分 ROM 上会被拦）。
+- **启动失败不再闪退**：`onCreate` 整体 `try/catch(Throwable)`，失败写 `crash.log`、
+  置 `STARTUP_ERROR`、`finish()`，由 `player.js` 自动回退到旧的 WebGL 播放器。
 - 边下边看暂未切原生：`/stream/` 水位不足返回 503，ExoPlayer 会当硬错误，需要先改阻塞语义或加重试策略。
 
 每个阶段独立构建 APK 真机验证，不合并成一次大改。

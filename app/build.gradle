@@ -11,8 +11,8 @@ android {
         applicationId "com.prototypejust.weworkshop"
         minSdk 26
         targetSdk 35
-        versionCode 25
-        versionName "0.6.0"
+        versionCode 26
+        versionName "0.6.1"
         multiDexEnabled true
     }
 
@@ -52,6 +52,6 @@ dependencies {
     // 1.8.1 的 minCompileSdk 正好是 35，与项目一致；
     // setScrubbingModeEnabled 自 1.8 才进入 ExoPlayer 接口（1.7 及以下没有），
     // 拖动跟手依赖它，所以不能降到 1.6/1.7。1.11 起要求 compileSdk 36，暂不采用。
+    // 不引 media3-ui：播放页控件全部自绘，PlayerView 只会多一份 inflate 失败面。
     implementation 'androidx.media3:media3-exoplayer:1.8.1'
-    implementation 'androidx.media3:media3-ui:1.8.1'
 }

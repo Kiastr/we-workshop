@@ -191,7 +191,69 @@
 
   function playVideo(item) {
     if (!item || !item.url) return;
-    if (openNative(item)) return;   // 原生播放器已接管，不再走下面的 WebGL 链路
+    if (openNative(item)) {   // 原生播放器已接管，不再走下面的 WebGL 链路
+      armNativeFallback(item);
+      return;
+    }
+    playVideoLegacy(item);
+  }
+
+  /**
+   * 原生播放页启动失败时自动退回兼容播放器。
+   *
+   *  为什么需要这层：原生播放页一旦在 onCreate 阶段抛异常（面板 inflate、解码器初始化、
+   *  厂商 ROM 差异都可能），用户看到的就是闪退——连"看不了"的提示都没有。播放页现在
+   *  会把失败原因写进 Bridge，这里在页面回到前台时读一次，非空就立刻用旧的 WebGL 链路
+   *  重新开始播放。10 帧也是能看，闪退是彻底不能用。
+   *
+   *  两个触发点缺一不可：
+   *    - window focus：播放页 finish 后 WebView 重新拿到焦点（绝大多数情况）
+   *    - 定时器：播放页根本没来得及抢焦点就挂了（失败发生在 startActivity 之后极短时间内）
+   */
+  var nativeFallbackTimer = null;
+  var nativeFallbackBound = false;
+  // 每次起播自增。回退检查只在"还是这一次起播"时才生效，
+  // 否则用户连续点两个视频时，前一个的失败回调会把后一个顶掉。
+  var nativePlayToken = 0;
+
+  function armNativeFallback(item) {
+    var b = window.Bridge;
+    if (!b || typeof b.nativePlayerError !== 'function') return;
+
+    var token = ++nativePlayToken;
+
+    function disarm() {
+      if (nativeFallbackTimer) { clearTimeout(nativeFallbackTimer); nativeFallbackTimer = null; }
+      if (nativeFallbackBound) {
+        window.removeEventListener('focus', onFocus);
+        nativeFallbackBound = false;
+      }
+    }
+
+    function check() {
+      if (token !== nativePlayToken) return true;   // 已经换片，交给新的那次处理
+      var err = '';
+      try { err = b.nativePlayerError() || ''; } catch (e) { err = ''; }
+      if (!err) return false;
+      disarm();
+      try { if (b.toast) b.toast('原生播放器启动失败，已切回兼容模式：' + err); } catch (e) { }
+      playVideoLegacy(item);
+      return true;
+    }
+
+    function onFocus() { setTimeout(check, 260); }
+
+    disarm();
+    window.addEventListener('focus', onFocus);
+    nativeFallbackBound = true;
+    nativeFallbackTimer = setTimeout(function () {
+      nativeFallbackTimer = null;
+      // 1.6s 还没失败，说明播放页站住了，撤掉焦点监听，避免以后正常返回时误触发
+      if (!check()) disarm();
+    }, 1600);
+  }
+
+  function playVideoLegacy(item) {
     stopPlayback();
     P.current = item;
     P.stage = true;

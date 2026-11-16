@@ -76,6 +76,8 @@ Wallpaper Engine 没有手机端，创意工坊也只能在 PC 客户端里看�
 
 超分尚未迁到原生内核。下面的 WebGL 链路是 0.5.x 的旧实现，仅作为迁移参考保留；新方案见 `docs/NATIVE_SUPER_RESOLUTION.md`（Media3 `GlEffect` + Anime4K/FSR1，原画基线不受影响）。
 
+播放内核为什么是 Media3 而不是 libmpv、边下边看怎么并入同一个内核、什么条件下才改判，见 `docs/PLAYER_ARCHITECTURE.md`（ADR-001）。
+
 ### 旧 WebGL 超分链路（0.5.x）
 
 ### 三条硬规则

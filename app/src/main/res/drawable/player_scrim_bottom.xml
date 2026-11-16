@@ -1,9 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 底部遮罩：进度条与时间标签的对比度保障 -->
+<!--
+  底部遮罩：进度条与时间标签的对比度保障。
+
+  方向必须是 270（上 -> 下）：顶部透明、底部不透明。
+  写成 90（下 -> 上）会让 startColor 落在底部、endColor 落在顶部，
+  这个 View 的顶边就成了一条 #C9000000 的不透明硬边，在画面中下部横贯
+  一条黑线。遮罩只在控制层可见时才是 VISIBLE，所以现象表现为
+  "点一下屏幕出现进度条时才有黑线"。
+  实测位置 = 1 - 160dp / 横屏高度，与截图里 57.3% 处的线吻合。
+-->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
     <gradient
-        android:angle="90"
+        android:angle="270"
         android:startColor="#00000000"
         android:centerColor="#66000000"
         android:endColor="#C9000000"

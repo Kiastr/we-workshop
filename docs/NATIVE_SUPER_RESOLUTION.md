@@ -10,6 +10,9 @@
 
 **采用 Media3 单内核 + 可选 GlEffect 增强链，不引入 libmpv。**
 
+> 内核选型的完整论证（含 libmpv 在 Android 上的解码两难、改判条件）见
+> `docs/PLAYER_ARCHITECTURE.md`。这里只记结论。
+
 | 决策 | 内容 |
 | --- | --- |
 | 播放内核 | Media3 ExoPlayer **1.8.1**，硬解直出 SurfaceView |

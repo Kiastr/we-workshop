@@ -155,8 +155,43 @@
 
   // ---------------- 播放页 ----------------
 
+  /** 交给原生播放器（PlayerActivity）。
+   *
+   *  返回 true 表示已接管，调用方不要再启动 WebGL 播放链路。
+   *  拿不到 Bridge.playNative 时返回 false，回退到旧的 WebView 播放器。
+   *
+   *  为什么必须先把旧播放器停掉：WebGL 超分循环会持续占用 GPU，
+   *  和原生播放器的 4K 解码抢资源，表现出来就是原生播放器也掉帧。
+   */
+  function openNative(item) {
+    var b = window.Bridge;
+    if (!b || typeof b.playNative !== 'function') return false;
+    if (!item || !item.url) return false;
+    // 边下边看暂不接管：/stream/ 在水位不足时返回 503 + Retry-After，
+    // ExoPlayer 会把它当成硬错误直接报错，而旧链路是轮询等待水位的。
+    // 等 /stream/ 改成"阻塞到水位"或 ExoPlayer 侧加重试策略后再切。
+    if (item.streaming) return false;
+    try {
+      if (P.open) closePlayer();
+      else stopPlayback();
+    } catch (e) { }
+    try {
+      b.playNative(
+        String(item.url),
+        String(item.title || item.name || ''),
+        String(item.itemId || item.id || ''),
+        String(item.width || 0),
+        String(item.height || 0)
+      );
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function playVideo(item) {
     if (!item || !item.url) return;
+    if (openNative(item)) return;   // 原生播放器已接管，不再走下面的 WebGL 链路
     stopPlayback();
     P.current = item;
     P.stage = true;

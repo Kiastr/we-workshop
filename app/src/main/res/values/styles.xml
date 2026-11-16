@@ -5,4 +5,17 @@
         <item name="android:navigationBarColor">#0a0d16</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
+
+    <!--
+        播放页主题：纯黑底 + 全屏。
+        背景必须是纯黑而不是 #0a0d16，否则视频上下留边时会看到一条偏蓝的带子。
+    -->
+    <style name="Theme.Workshop.Player" parent="Theme.Workshop">
+        <item name="android:windowBackground">#FF000000</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:statusBarColor">#FF000000</item>
+        <item name="android:navigationBarColor">#FF000000</item>
+    </style>
 </resources>

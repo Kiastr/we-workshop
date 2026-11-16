@@ -30,6 +30,20 @@
             </intent-filter>
         </activity>
 
+        <!--
+            原生播放页。
+
+            configChanges 必须覆盖 orientation|screenSize|screenLayout|smallestScreenSize：
+            旋转时不能让 Activity 重建，否则播放会话和进度都会丢，用户会看到从头开始。
+            方向由 PlayerActivity 按视频宽高自行决定，所以这里不写 screenOrientation。
+        -->
+        <activity
+            android:name=".PlayerActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Workshop.Player"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode" />
+
         <!-- 下载期间保活，防止后台被系统回收导致任务中断 -->
         <service
             android:name=".DownloadService"

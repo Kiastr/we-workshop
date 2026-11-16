@@ -3,6 +3,7 @@ package com.prototypejust.weworkshop;
 import android.app.Activity;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 import android.widget.Toast;
@@ -370,6 +371,59 @@ public class Bridge {
         LocalVideoServer srv = LocalVideoServer.get(activity);
         if (srv == null) return "{\"ok\":false,\"error\":\"视频服务启动失败\"}";
         return srv.listJson();
+    }
+
+    /**
+     * 用原生播放器打开一个视频。
+     *
+     * <p>只接受 LocalVideoServer 给出的 127.0.0.1 地址或本地文件路径，不接受任意 URL——
+     * 这个桥接对所有页面脚本可见，放开任意地址等于把播放器变成 SSRF 跳板。
+     *
+     * <p>width/height 可传 0：PlayerActivity 会在 onVideoSizeChanged 里按实际宽高决定方向。
+     */
+    @JavascriptInterface
+    public void playNative(String url, String title, String itemId, String width, String height) {
+        if (url == null || url.isEmpty()) return;
+        if (!isAllowedPlayUrl(url)) {
+            Log.w("Bridge", "playNative rejected url: " + url);
+            return;
+        }
+        try {
+            long id = 0L;
+            if (itemId != null && !itemId.isEmpty()) {
+                try {
+                    id = Long.parseLong(itemId.trim());
+                } catch (NumberFormatException ignored) {
+                    // 边下边看传的是 "stream_123"，解析失败就按 0 处理，不影响播放
+                }
+            }
+            int w = parseIntOrZero(width);
+            int h = parseIntOrZero(height);
+            activity.startActivity(
+                    PlayerActivity.buildIntent(activity, url, title, id, w, h));
+        } catch (Exception e) {
+            Log.e("Bridge", "playNative failed", e);
+            toast("无法打开播放器");
+        }
+    }
+
+    /** 只允许本机回环地址与本地文件，避免桥接被当成任意 URL 播放器。 */
+    private static boolean isAllowedPlayUrl(String url) {
+        String u = url.trim().toLowerCase(java.util.Locale.US);
+        if (u.startsWith("http://127.0.0.1") || u.startsWith("http://localhost")) return true;
+        if (u.startsWith("file://")) return true;
+        if (u.startsWith("/")) return true;              // 裸路径
+        if (u.startsWith("content://")) return true;      // SAF / MediaStore
+        return false;
+    }
+
+    private static int parseIntOrZero(String s) {
+        if (s == null || s.isEmpty()) return 0;
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /** 边下边看：查询某条正在下载的工坊条目能否现在就预览。

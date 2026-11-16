@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  原生播放页布局。
+
+  关键点：
+  1. PlayerView 显式声明 surface_type=surface_view —— TextureView 会多一次 GPU 合成，
+     4K60 下直接掉帧。这里必须是 SurfaceView。
+  2. use_controller=false —— 不用 Media3 自带控制器（那套是文字按钮 + 老式 SeekBar），
+     控制器由 PlayerActivity 自建，全部图标按钮。
+  3. resize_mode=fit —— 保持原始宽高比，不裁切画面。
+  4. 控制层整体 visibility=gone，单击画面才显示，3 秒后自动隐藏。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/playerRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/playerView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:use_controller="false"
+        app:resize_mode="fit"
+        app:surface_type="surface_view"
+        app:show_buffering="never"
+        app:shutter_background_color="#00000000" />
+
+    <!-- 首帧前的占位：不显示黑屏，显示封面（有封面时由代码设置） -->
+    <ImageView
+        android:id="@+id/posterView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitCenter"
+        android:visibility="gone"
+        android:contentDescription="@null" />
+
+    <ProgressBar
+        android:id="@+id/loading"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_gravity="center"
+        android:indeterminateTint="#7FB3F0"
+        android:visibility="gone" />
+
+    <!-- 控制层 -->
+    <FrameLayout
+        android:id="@+id/controls"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone">
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="140dp"
+            android:layout_gravity="top"
+            android:background="@drawable/player_scrim_top" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="160dp"
+            android:layout_gravity="bottom"
+            android:background="@drawable/player_scrim_bottom" />
+
+        <LinearLayout
+            android:id="@+id/topBar"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_gravity="top"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp">
+
+            <ImageButton
+                android:id="@+id/btnBack"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_back"
+                android:scaleType="centerInside"
+                android:contentDescription="返回" />
+
+            <TextView
+                android:id="@+id/titleView"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="8dp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textColor="#E8EDF7"
+                android:textSize="15sp" />
+
+            <ImageButton
+                android:id="@+id/btnMore"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_more"
+                android:scaleType="centerInside"
+                android:contentDescription="更多" />
+        </LinearLayout>
+
+        <ImageButton
+            android:id="@+id/btnPlay"
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:layout_gravity="center"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_pause"
+            android:scaleType="centerInside"
+            android:contentDescription="播放或暂停" />
+
+        <LinearLayout
+            android:id="@+id/bottomBar"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_gravity="bottom"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="14dp"
+            android:paddingEnd="4dp">
+
+            <TextView
+                android:id="@+id/timeCurrent"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#E8EDF7"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:text="00:00" />
+
+            <SeekBar
+                android:id="@+id/seekBar"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="10dp"
+                android:layout_marginEnd="10dp"
+                android:maxHeight="3dp"
+                android:minHeight="3dp" />
+
+            <TextView
+                android:id="@+id/timeTotal"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#A9B6CC"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:text="00:00" />
+
+            <ImageButton
+                android:id="@+id/btnFullscreen"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_fullscreen"
+                android:scaleType="centerInside"
+                android:contentDescription="全屏" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- 手势热区提示：拖动进度时浮出的时间气泡 -->
+    <TextView
+        android:id="@+id/seekBubble"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="#CC0F1420"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:textColor="#FFFFFF"
+        android:textSize="18sp"
+        android:fontFamily="monospace"
+        android:visibility="gone" />
+</FrameLayout>

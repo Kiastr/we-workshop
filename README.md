@@ -22,9 +22,9 @@ Wallpaper Engine 没有手机端，创意工坊也只能在 PC 客户端里看�
 - **下载源文件**：登录 Steam 后把壁纸源文件（视频等）直接下载到手机 `Download/Wallpaper WE/`
 - 下载列表：进度、取消、失败重试、打开所在文件夹
 - 断点续传 + 失败自动重试（最多 3 次，间隔 3s / 6s / 12s）
-- **本地视频播放**：顶栏 ▶ 打开列表，播放 / 暂停、拖动进度、倍速、全屏、循环
-- **边下边看**：下载过程中即可预览（不必等下载完成），沿用同一套 WebGL2 超分管线；索引在文件尾部的视频会自动禁用并提示
-- **真超分**：Anime4K / FSR / FSRCNNX / AnimeJaNai 共 7 档，实时 WebGL2 渲染，带生效确认、性能看门狗、阶梯降档与 A/B 对比
+- **原生播放**：点击即进入 Media3 原生播放页，4K60 硬解直出，拖动跟手，真实横屏全屏，鼠标/手势全图标控件
+- **边下边看**：下载过程中即可预览（不必等下载完成），索引在文件尾部的视频会自动禁用并提示
+- **超分**：7 档 WebGL2 渲染（Anime4K / FSR / FSRCNNX / AnimeJaNai），带生效确认、性能看门狗与阶梯降档 —— 当前仍在 WebView 链路，正向原生 `GlEffect` 迁移，见 `docs/NATIVE_SUPER_RESOLUTION.md`
 - **网络加速（App 内 hosts）**：顶栏 ⚡，5 组服务可独立开关，一键 TLS 测速优选 IP，失败自动回退系统解析
 
 ## 数据源与原理
@@ -36,9 +36,35 @@ Wallpaper Engine 没有手机端，创意工坊也只能在 PC 客户端里看�
 - **边下边看**：`StreamRegistry` 逐 chunk 登记已写入区间、算出「连续可读水位」，`LocalVideoServer` 的 `/stream/<itemId>` 把 Range 裁剪到水位并阻塞等待下载推进；下载完成后按文件名切到 MediaStore 成品续播
 - **网络**：需要能访问 Steam（国内需代理或 VPN，手机开全局代理 / TUN 模式即可）；播放与超分全程离线，不联网
 
-## 本地视频播放与真超分
+## 播放：原生内核与超分（迁移中）
 
-点顶栏 **▶** 打开本地视频列表，选中即播放。播放页可切换档位、倍速、全屏，**按住「A/B 对比」显示原画**。
+**0.6.0 起，点击视频直接进入原生播放页**（`PlayerActivity`），不再经过 WebView 的 `<video>` 弹窗。
+
+### 原生内核（当前默认）
+
+| 项 | 实现 |
+| --- | --- |
+| 内核 | Media3 ExoPlayer 1.8.1 |
+| 输出 | `SurfaceView` + 解码器直出，帧数据全程在 GPU，不经过 JavaScript / Bitmap / `texSubImage2D` |
+| 视频效果 | 默认 `setVideoEffects(emptyList())`，**不创建 GL 处理链**，原画零额外开销 |
+| 拖动 | 拖动中 `SeekParameters.CLOSEST_SYNC` + `setScrubbingModeEnabled(true)`（只解关键帧、解码器超实时运行），松手切回 `EXACT` 精确落点 |
+| 全屏 | 真实 `SENSOR_LANDSCAPE` + 沉浸式隐藏状态栏/导航栏，旋转不重建播放会话 |
+| 控件 | 全部 Material 图标按钮，无文字按钮；单击显隐，双击左右 ±10s，左滑亮度、右滑音量 |
+
+播放器会把实测数据写进日志（`Android/data/com.prototypejust.weworkshop/files/weworkshop.log`）：
+
+```text
+[Player] input 3840x2160@60 video/avc container=video/mp4
+[Player] decoder=c2.qti.hevc.decoder hw=true initMs=48
+[Player] firstFrame=210ms
+[Player] [perf] 3840x2160@60 video/avc | 渲染 3840x2160 @ 60fps | 解码器 ...（硬解） | 丢帧 12 / 约 3600 帧（0.33%）
+```
+
+「播放信息」菜单项可随时查看同一组数据。**丢帧 > 0.5% 就说明这台设备这一档没跑住**，不要凭手感判断。
+
+超分尚未迁到原生内核。下面的 WebGL 链路是 0.5.x 的旧实现，仅作为迁移参考保留；新方案见 `docs/NATIVE_SUPER_RESOLUTION.md`（Media3 `GlEffect` + Anime4K/FSR1，原画基线不受影响）。
+
+### 旧 WebGL 超分链路（0.5.x）
 
 ### 三条硬规则
 
